@@ -218,10 +218,11 @@ def process_document_with_api(**context) -> Dict[str, Any]:
         # Формирование опций для API
         use_ocr = bool(config.get("enable_ocr", False))
         recommended_ocr = config.get("chinese_doc_analysis", {}).get("recommended_ocr")
-        if recommended_ocr and not use_ocr:
-            logger.info(
-                "🔕 OCR recommendation ignored: digital PDF pipeline requires text-layer processing"
-            )
+        if recommended_ocr is True and not use_ocr:
+            logger.info("🔁 OCR включен по рекомендации анализа документа")
+            use_ocr = True
+        elif recommended_ocr is False and use_ocr:
+            logger.info("ℹ️ OCR оставлен включенным согласно входной конфигурации")
 
         api_options = {
             "extract_tables": bool(config.get("extract_tables", True)),
