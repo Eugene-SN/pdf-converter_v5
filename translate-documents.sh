@@ -41,6 +41,14 @@ LOGS_DIR="${SCRIPT_DIR}/logs"
 # Создание директорий
 mkdir -p "$HOST_INPUT_DIR" "$HOST_OUTPUT_ZH_DIR" "$HOST_OUTPUT_RU_DIR" "$HOST_OUTPUT_EN_DIR" "$LOGS_DIR"
 
+# Настройки логирования для одного запуска
+LOG_FILE="${LOGS_DIR}/translation_$(date +%Y%m%d_%H%M%S)_$$.log"
+touch "$LOG_FILE"
+
+log_file_path() {
+    echo "$LOG_FILE"
+}
+
 # =============================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # =============================================================================
@@ -51,7 +59,7 @@ log() {
     local message="$*"
     local timestamp
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo -e "${BLUE}[$timestamp]${NC} ${YELLOW}[$level]${NC} $message" | tee -a "$LOGS_DIR/translation_$(date +%Y%m%d_%H%M%S).log"
+    echo -e "${BLUE}[$timestamp]${NC} ${YELLOW}[$level]${NC} $message" | tee -a "$(log_file_path)"
 }
 
 show_header() {
@@ -446,6 +454,7 @@ show_processing_results() {
 # Основная логика
 main() {
     show_header
+    log "INFO" "Запись лога: $(log_file_path)"
 
     if ! check_services; then
         echo -e "${RED}❌ Сервисы недоступны. Запустите: docker-compose up -d${NC}"
