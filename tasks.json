@@ -1,0 +1,15 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Apply Codex patch & push",
+      "type": "shell",
+      "command": "pbpaste | git apply --index --whitespace=fix && git commit -m \"Apply patch from Codex\" && git push",
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    }
+  ]
+}
