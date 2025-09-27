@@ -37,6 +37,14 @@ LOGS_DIR="${SCRIPT_DIR}/logs"
 # Создание директорий
 mkdir -p "$HOST_INPUT_DIR" "$HOST_OUTPUT_DIR" "$LOGS_DIR"
 
+# Настройки логирования для одного запуска
+LOG_FILE="${LOGS_DIR}/conversion_$(date +%Y%m%d_%H%M%S)_$$.log"
+touch "$LOG_FILE"
+
+log_file_path() {
+    echo "$LOG_FILE"
+}
+
 # =============================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # =============================================================================
@@ -47,7 +55,7 @@ log() {
     local message="$*"
     local timestamp
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo -e "${BLUE}[$timestamp]${NC} ${YELLOW}[$level]${NC} $message" | tee -a "$LOGS_DIR/conversion_$(date +%Y%m%d_%H%M%S).log"
+    echo -e "${BLUE}[$timestamp]${NC} ${YELLOW}[$level]${NC} $message" | tee -a "$(log_file_path)"
 }
 
 show_header() {
@@ -384,6 +392,7 @@ check_dependencies() {
 # Основная логика
 main() {
     show_header
+    log "INFO" "Запись лога: $(log_file_path)"
     check_dependencies
     check_services
 
