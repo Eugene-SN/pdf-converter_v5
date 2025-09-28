@@ -6,9 +6,12 @@
       "type": "shell",
       "command": "./apply_patch.sh",
       "problemMatcher": [],
-      "group": {
-        "kind": "build",
-        "isDefault": true
+      "group": { "kind": "build", "isDefault": true },
+      "options": {
+        "shell": {
+          "executable": "/bin/zsh",
+          "args": ["-lc"]
+        }
       }
     }
   ]
