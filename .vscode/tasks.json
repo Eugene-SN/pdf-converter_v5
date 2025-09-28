@@ -1,15 +1,72 @@
 {
   "version": "2.0.0",
+  "options": {
+    "shell": {
+      "executable": "/bin/zsh",
+      "args": ["-lc"]
+    }
+  },
   "tasks": [
     {
-      "label": "Apply Codex patch & push",
+      "label": "Codex: Apply patch from clipboard & Push (auto)",
       "type": "shell",
-      "command": "pbpaste | git apply --index --whitespace=fix && git commit -m \"Apply patch from Codex\" && git push",
+      "command": $'set -e\n' +
+                 '# 1) Пытаемся применить как git-format (Copy as git apply / git am)\n' +
+                 'if pbpaste | git am -3 2>/dev/null; then\n' +
+                 '  echo "[OK] Applied via git am";\n' +
+                 'else\n' +
+                 '  # Если am не сработал — на всякий случай прервём сессию am\n' +
+                 '  git am --abort >/dev/null 2>&1 || true\n' +
+                 '  echo "[i] git am did not apply. Trying git apply…"\n' +
+                 '  # 2) Сначала проверим, применим ли unified diff без записи\n' +
+                 '  if pbpaste | git apply --check --whitespace=fix 2>/dev/null; then\n' +
+                 '    # Применяем без --index (чтобы не падать на /dev/null) и потом добавляем всё\n' +
+                 '    pbpaste | git apply --whitespace=fix\n' +
+                 '    git add -A\n' +
+                 '    echo "[OK] Applied via git apply + staged";\n' +
+                 '  else\n' +
+                 '    echo "[i] git apply --check failed. Trying fallback with --reject…"\n' +
+                 '    TMP=$(mktemp /tmp/codex_patch.XXXXXX.patch)\n' +
+                 '    pbpaste > "$TMP"\n' +
+                 '    if git apply --reject --whitespace=fix "$TMP"; then\n' +
+                 '      git add -A\n' +
+                 '      echo "[OK] Applied via git apply --reject (check .rej if needed)";\n' +
+                 '    else\n' +
+                 '      echo "[ERR] Failed to apply patch. See rejects or verify patch format."\n' +
+                 '      exit 1\n' +
+                 '    fi\n' +
+                 '  fi\n' +
+                 'fi\n' +
+                 '# 3) Коммит: если коммита нет (после git am он уже есть), то попробуем закоммитить\n' +
+                 'git diff --cached --quiet && git diff --quiet && NOCHANGES=1 || NOCHANGES=0\n' +
+                 'if [ "$NOCHANGES" -eq 0 ]; then\n' +
+                 '  git commit -m "Apply patch from Codex" || true\n' +
+                 'else\n' +
+                 '  echo "[i] Nothing to commit (changes may have been committed by git am)."\n' +
+                 'fi\n' +
+                 '# 4) Актуализируем ветку и пушим\n' +
+                 'git pull --rebase --autostash || true\n' +
+                 'git push\n' +
+                 'echo "[DONE] Synced with GitHub."',
       "problemMatcher": [],
       "group": {
         "kind": "build",
         "isDefault": true
       }
+    },
+
+    {
+      "label": "Codex: Apply from clipboard (git am) & Push",
+      "type": "shell",
+      "command": "set -e; pbpaste | git am -3; git push",
+      "problemMatcher": []
+    },
+
+    {
+      "label": "Codex: Apply from clipboard (git apply) & Push",
+      "type": "shell",
+      "command": "set -e; if pbpaste | git apply --check --whitespace=fix; then pbpaste | git apply --whitespace=fix; git add -A; else TMP=$(mktemp /tmp/codex_patch.XXXXXX.patch); pbpaste > \"$TMP\"; git apply --reject --whitespace=fix \"$TMP\"; git add -A; fi; git commit -m \"Apply patch from Codex\" || true; git pull --rebase --autostash || true; git push",
+      "problemMatcher": []
     }
   ]
 }
