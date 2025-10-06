@@ -15,6 +15,7 @@
 """
 
 import os
+import io
 import json
 import logging
 import asyncio
@@ -172,6 +173,36 @@ class DoclingProcessor:
         try:
             if isinstance(payload, (bytes, bytearray, memoryview)):
                 return bytes(payload)
+
+            if isinstance(payload, (str, os.PathLike)):
+                candidate_path = Path(payload)
+                if candidate_path.exists():
+                    try:
+                        return candidate_path.read_bytes()
+                    except Exception:
+                        logger.debug("Failed to read image payload from path %s", candidate_path, exc_info=True)
+
+            if isinstance(payload, io.BufferedIOBase):
+                try:
+                    current_position = None
+                    if payload.seekable():
+                        try:
+                            current_position = payload.tell()
+                        except Exception:
+                            current_position = None
+                        payload.seek(0)
+                    data = payload.read()
+                    if current_position is not None:
+                        try:
+                            payload.seek(current_position)
+                        except Exception:
+                            pass
+                    if isinstance(data, str):
+                        data = data.encode()
+                    if isinstance(data, (bytes, bytearray, memoryview)):
+                        return bytes(data)
+                except Exception:
+                    logger.debug("Buffered IO payload could not be read", exc_info=True)
 
             # io.BytesIO and similar expose getbuffer / getvalue / read methods
             if hasattr(payload, "getbuffer"):
@@ -609,8 +640,9 @@ class DoclingProcessor:
                         try:
                             with open(image_file, "wb") as f:
                                 f.write(image_bytes)
-                            image_data["file_path"] = str(image_file)
+                            image_data["file_path"] = str(image_file.resolve())
                             image_data["size_bytes"] = len(image_bytes)
+                            image_data["extension"] = extension
                             saved = True
                             break
                         except Exception as write_error:
@@ -634,6 +666,8 @@ class DoclingProcessor:
                         logger.warning(
                             "Unable to persist image %s from %s", i, original_file_path
                         )
+                        image_data.setdefault("errors", []).append("persist_failed")
+                        image_data["file_path"] = None
 
                     images.append(image_data)
             
