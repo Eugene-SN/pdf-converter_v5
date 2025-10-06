@@ -6,13 +6,23 @@
 
 $ErrorActionPreference = "Stop"
 
-function Run-Git([string]$ArgsLine, [switch]$Quiet) {
-  if ($Quiet) { & git $ArgsLine | Out-Null } else { & git $ArgsLine }
-  if ($LASTEXITCODE -ne 0) { throw "[GIT] Command failed: git $ArgsLine" }
+function Run-Git {
+  param(
+    [string[]] $Args,
+    [switch]   $Quiet
+  )
+  if ($Quiet) {
+    & git @Args | Out-Null
+  } else {
+    & git @Args
+  }
+  if ($LASTEXITCODE -ne 0) {
+    throw "[GIT] Command failed: git $($Args -join ' ')"
+  }
 }
 
-# 0) Ensure repo
-Run-Git "rev-parse --is-inside-work-tree" -Quiet
+# 0) Ensure repo (и что git в PATH)
+Run-Git @('rev-parse','--is-inside-work-tree') -Quiet
 
 # 1) Clipboard
 $raw = Get-Clipboard
@@ -22,6 +32,7 @@ if ([string]::IsNullOrWhiteSpace($raw)) { throw "[ERR] Clipboard is empty." }
 $raw = $raw -replace "`r`n","`n" -replace "`r","`n"
 
 # 3) Remove common invisible chars at the very beginning of the WHOLE text
+#    BOM U+FEFF, ZWSP U+200B, LRM U+200E, RLM U+200F, NBSP U+00A0
 $raw = $raw -replace "^[`uFEFF`u200B`u200E`u200F`u00A0]+", ""
 
 # 4) Strip Markdown code fences if present
@@ -29,8 +40,7 @@ $raw = $raw -replace "(?s)^\s*```[a-zA-Z0-9_-]*\s*", ""
 $raw = $raw -replace "(?s)\s*```\s*$", ""
 $raw = $raw.Trim()
 
-# 5) Remove invisible chars at the START OF EACH LINE (but DO NOT remove normal spaces)
-#    This fixes cases where @@ lines or diff headers are prefixed with ZWSP/LRM etc.
+# 5) Remove invisible chars at the START OF EACH LINE (не трогаем обычные пробелы)
 $raw = [regex]::Replace($raw, "(?m)^[`uFEFF`u200B`u200E`u200F`u00A0]+", "")
 
 # 6) Keep from first 'From <sha>' or 'diff --git'
@@ -49,14 +59,13 @@ else {
 
 # 7) Must have at least one hunk @@ (allow leading invisible/space)
 if ($raw -notmatch "(?m)^\s*@@") {
-  # Диагностика: покажем первые 20 строк для наглядности
   $preview = (($raw -split "`n") | Select-Object -First 20) -join "`n"
   throw "[ERR] No hunks found (^\s*@@). The clipboard likely contains headers only or was mangled by formatting.`n--- Preview ---`n$preview"
 }
 
 # 8) Save to temp (UTF-8 no BOM)
 $tmp = Join-Path $env:TEMP ("codex_patch_{0}.patch" -f ([guid]::NewGuid().ToString("N")))
-[IO.File]::WriteAllText($tmp, $raw, [Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText($tmp,$raw,[Text.UTF8Encoding]::new($false))
 Write-Host "[i] Patch saved to $tmp"
 
 # 9) Diagnostics
@@ -74,18 +83,19 @@ $unified   = ($raw -match "(?m)^\s*diff --git\s")
 try {
   if ($gitFormat) {
     Write-Host "[i] Trying: git am -3"
-    Run-Git "am -3 `"$tmp`""
+    Run-Git @('am','-3',$tmp)
     Write-Host "[OK] Applied via git am"
   } else {
     Write-Host "[i] Trying: git apply --check/--whitespace=fix"
+    # check (verbose if fails)
     & git apply --check --whitespace=fix "$tmp"
     if ($LASTEXITCODE -ne 0) {
       Write-Host "[i] git apply --check failed, verbose output:"
       & git apply -v --check --whitespace=fix "$tmp"
       throw "[GIT] git apply --check failed"
     }
-    Run-Git "apply --whitespace=fix `"$tmp`""
-    Run-Git "add -A"
+    Run-Git @('apply','--whitespace=fix',$tmp)
+    Run-Git @('add','-A')
     & git commit -m "Apply patch from Codex" | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "[GIT] Commit failed (possibly empty patch)." }
     Write-Host "[OK] Applied via git apply"
@@ -100,7 +110,7 @@ catch {
     & git apply -v --reject --whitespace=fix "$tmp"
     throw "[GIT] git apply --reject failed"
   }
-  Run-Git "add -A"
+  Run-Git @('add','-A')
   & git commit -m "Apply patch from Codex (with rejects)" | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "[GIT] Commit failed after rejects." }
   Write-Host "[OK] Applied via git apply --reject (check *.rej if any)"
@@ -109,7 +119,7 @@ catch {
 # 12) Sync explicitly
 & git pull --rebase --autostash origin main | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "[GIT] pull --rebase failed." }
-Run-Git "push origin HEAD:main"
+Run-Git @('push','origin','HEAD:main')
 
 Write-Host "[DONE] Synced with GitHub."
 Remove-Item -Force $tmp
