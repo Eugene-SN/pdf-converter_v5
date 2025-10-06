@@ -15,6 +15,7 @@
 """
 
 import os
+import io
 import json
 import logging
 import asyncio
@@ -23,6 +24,7 @@ from pathlib import Path
 import tempfile
 from datetime import datetime
 import traceback
+import imghdr
 
 # ✅ ИСПРАВЛЕНО: Правильные импорты Docling v2.0+
 from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -140,9 +142,167 @@ class DoclingProcessor:
         
         # ✅ ИСПРАВЛЕНО: Инициализируем базовый конвертер БЕЗ OCR
         self._initialize_base_converter()
-        
+
+        # ✅ ИНИЦИАЛИЗИРУЕМ CHUNKER, ЕСЛИ ДОСТУПНЫ НЕОБХОДИМЫЕ ЗАВИСИМОСТИ
+        try:
+            self._initialize_chunker()
+        except Exception as chunker_error:
+            logger.warning(
+                "Chunker initialization failed during startup",
+                error=str(chunker_error),
+            )
+
+        if self.chunker is not None:
+            logger.info("Chunker status: enabled")
+        else:
+            status_msg = (
+                "Chunker status: skipped (transformers not available)"
+                if not HF_TRANSFORMERS_AVAILABLE
+                else "Chunker status: disabled"
+            )
+            logger.info(status_msg)
+
         logger.info("DoclingProcessor initialized with conditional OCR loading")
-    
+
+    def _resolve_image_bytes(self, payload: Any) -> Optional[bytes]:
+        """Attempt to extract raw bytes from a payload returned by Docling images."""
+
+        if payload is None:
+            return None
+
+        try:
+            if isinstance(payload, (bytes, bytearray, memoryview)):
+                return bytes(payload)
+
+            if isinstance(payload, (str, os.PathLike)):
+                candidate_path = Path(payload)
+                if candidate_path.exists():
+                    try:
+                        return candidate_path.read_bytes()
+                    except Exception:
+                        logger.debug("Failed to read image payload from path %s", candidate_path, exc_info=True)
+
+            if isinstance(payload, io.BufferedIOBase):
+                try:
+                    current_position = None
+                    if payload.seekable():
+                        try:
+                            current_position = payload.tell()
+                        except Exception:
+                            current_position = None
+                        payload.seek(0)
+                    data = payload.read()
+                    if current_position is not None:
+                        try:
+                            payload.seek(current_position)
+                        except Exception:
+                            pass
+                    if isinstance(data, str):
+                        data = data.encode()
+                    if isinstance(data, (bytes, bytearray, memoryview)):
+                        return bytes(data)
+                except Exception:
+                    logger.debug("Buffered IO payload could not be read", exc_info=True)
+
+            # io.BytesIO and similar expose getbuffer / getvalue / read methods
+            if hasattr(payload, "getbuffer"):
+                try:
+                    buffer = payload.getbuffer()
+                    return bytes(buffer)
+                except Exception:
+                    pass
+
+            if hasattr(payload, "to_bytes") and callable(payload.to_bytes):
+                try:
+                    return payload.to_bytes()
+                except Exception:
+                    pass
+
+            if hasattr(payload, "tobytes") and callable(payload.tobytes):
+                try:
+                    return payload.tobytes()
+                except Exception:
+                    pass
+
+            if hasattr(payload, "getvalue") and callable(payload.getvalue):
+                try:
+                    value = payload.getvalue()
+                    if isinstance(value, (bytes, bytearray, memoryview)):
+                        return bytes(value)
+                except Exception:
+                    pass
+
+            if hasattr(payload, "read") and callable(payload.read):
+                try:
+                    data = None
+                    if hasattr(payload, "seek") and callable(payload.seek):
+                        current_position = None
+                        if hasattr(payload, "tell") and callable(payload.tell):
+                            try:
+                                current_position = payload.tell()
+                            except Exception:
+                                current_position = None
+                        try:
+                            payload.seek(0)
+                        except Exception:
+                            current_position = None
+                        data = payload.read()
+                        if current_position is not None:
+                            try:
+                                payload.seek(current_position)
+                            except Exception:
+                                pass
+                    else:
+                        data = payload.read()
+
+                    if isinstance(data, str):
+                        data = data.encode()
+
+                    if isinstance(data, (bytes, bytearray, memoryview)):
+                        return bytes(data)
+                except Exception:
+                    pass
+
+        except Exception:
+            logger.debug("Failed to resolve image payload into bytes", exc_info=True)
+
+        return None
+
+    def _detect_image_extension(self, image_obj: Any, image_bytes: Optional[bytes]) -> str:
+        """Determine the most appropriate extension for an exported image."""
+
+        format_hint: Optional[str] = None
+
+        for attr in ("format", "mime_type", "media_type"):
+            value = getattr(image_obj, attr, None)
+            if value:
+                format_hint = str(value).strip().lower()
+                break
+
+        extension = None
+        if format_hint:
+            if "/" in format_hint:
+                format_hint = format_hint.split("/")[-1]
+            format_hint = format_hint.lstrip(".")
+
+            if format_hint == "jpeg":
+                extension = "jpg"
+            elif format_hint == "tiff":
+                extension = "tif"
+            elif format_hint:
+                extension = format_hint
+
+        if not extension and image_bytes:
+            detected = imghdr.what(None, h=image_bytes)
+            if detected == "jpeg":
+                extension = "jpg"
+            elif detected == "tiff":
+                extension = "tif"
+            elif detected:
+                extension = detected
+
+        return extension or "bin"
+
     def _initialize_base_converter(self):
         """✅ ИСПРАВЛЕНО: Инициализация базового конвертера без OCR"""
         try:
@@ -435,6 +595,9 @@ class DoclingProcessor:
             
             # Извлечение изображений
             images = []
+            output_dir_path = Path(output_dir)
+            output_dir_path.mkdir(parents=True, exist_ok=True)
+
             if hasattr(docling_document, 'images'):
                 for i, image in enumerate(docling_document.images):
                     image_data = {
@@ -443,13 +606,69 @@ class DoclingProcessor:
                         "bbox": getattr(image, 'bbox', None),
                         "format": getattr(image, 'format', 'unknown')
                     }
-                    
-                    # Сохранение изображения
-                    if hasattr(image, 'data'):
-                        image_file = Path(output_dir) / f"image_{i}.png"
-                        # Здесь должна быть логика сохранения изображения
-                        image_data["file_path"] = str(image_file)
-                    
+
+                    payload_candidates: List[Any] = []
+
+                    for attr_name in ("data", "content", "buffer", "bytes", "raw"):
+                        if not hasattr(image, attr_name):
+                            continue
+                        candidate = getattr(image, attr_name)
+                        if callable(candidate):
+                            try:
+                                candidate = candidate()
+                            except Exception:
+                                continue
+                        payload_candidates.append(candidate)
+
+                    for method_name in ("get_data", "getbuffer", "to_bytes", "tobytes"):
+                        method = getattr(image, method_name, None)
+                        if callable(method):
+                            try:
+                                payload_candidates.append(method())
+                            except Exception:
+                                continue
+
+                    saved = False
+                    for payload in payload_candidates:
+                        image_bytes = self._resolve_image_bytes(payload)
+                        if not image_bytes:
+                            continue
+
+                        extension = self._detect_image_extension(image, image_bytes)
+                        image_file = output_dir_path / f"image_{i}.{extension}"
+
+                        try:
+                            with open(image_file, "wb") as f:
+                                f.write(image_bytes)
+                            image_data["file_path"] = str(image_file.resolve())
+                            image_data["size_bytes"] = len(image_bytes)
+                            image_data["extension"] = extension
+                            saved = True
+                            break
+                        except Exception as write_error:
+                            logger.warning(
+                                "Failed to write image %s to %s: %s",
+                                i,
+                                image_file,
+                                write_error,
+                            )
+                            if image_file.exists():
+                                try:
+                                    image_file.unlink()
+                                except Exception:
+                                    logger.debug(
+                                        "Failed to clean up incomplete image file %s",
+                                        image_file,
+                                        exc_info=True,
+                                    )
+
+                    if not saved:
+                        logger.warning(
+                            "Unable to persist image %s from %s", i, original_file_path
+                        )
+                        image_data.setdefault("errors", []).append("persist_failed")
+                        image_data["file_path"] = None
+
                     images.append(image_data)
             
             # ✅ НОВОЕ: Продвинутое chunking если доступно

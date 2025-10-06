@@ -66,7 +66,7 @@ log() {
     local message="$*"
     local timestamp
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo -e "${BLUE}[$timestamp]${NC} ${YELLOW}[$level]${NC} $message" | tee -a "$(log_file_path)"
+    echo -e "${BLUE}[$timestamp]${NC} ${YELLOW}[$level]${NC} $message" | tee -a "$(log_file_path)" >&2
 }
 
 show_header() {
@@ -338,7 +338,7 @@ wait_for_completion() {
                 ;;
             "running")
                 local progress_msg="Выполняется (${elapsed}s)"
-                printf "\r${YELLOW}[КОНВЕРТАЦИЯ]${NC} $progress_msg "
+                printf "\r${YELLOW}[КОНВЕРТАЦИЯ]${NC} $progress_msg " >&2
                 sleep 10
                 ;;
             *)
@@ -379,7 +379,9 @@ show_completion_results() {
 
             # Показать первые несколько строк
             log "INFO" "📖 Превью содержимого:"
-            head -5 "$latest_file" | sed 's/^/  /'
+            while IFS= read -r preview_line; do
+                log "INFO" "  $preview_line"
+            done < <(head -5 "$latest_file")
         else
             log "WARN" "⚠️ Качество: Файл может быть слишком коротким"
         fi
@@ -409,12 +411,12 @@ process_batch() {
 
     if [ $total_files -eq 0 ]; then
         log "WARN" "📂 Нет PDF файлов в $HOST_INPUT_DIR"
-        echo "Поместите PDF файлы в папку $HOST_INPUT_DIR и запустите снова"
+        log "INFO" "Поместите PDF файлы в папку $HOST_INPUT_DIR и запустите снова"
         return 0
     fi
 
     log "INFO" "📊 Найдено файлов для конвертации: $total_files"
-    echo ""
+    >&2 echo ""
 
     # Обработка файлов
     local processed=0
@@ -447,7 +449,7 @@ process_batch() {
                 echo -e "Статус: ${RED}❌ ОШИБКА КОНВЕРТАЦИИ${NC}"
             fi
         fi
-        echo ""
+        >&2 echo ""
     done
 
     # Итоговая статистика
@@ -455,17 +457,19 @@ process_batch() {
     end_time=$(date +%s)
     local total_duration=$((end_time - start_time))
 
-    echo "==============================================================================="
-    echo -e "${GREEN}ПОЛНАЯ КОНВЕРТАЦИЯ ЗАВЕРШЕНА${NC}"
-    echo "==============================================================================="
-    echo -e "📊 Статистика обработки:"
-    echo -e " Успешно конвертировано: ${GREEN}$processed${NC} файлов"
-    echo -e " Ошибок: ${RED}$failed${NC} файлов"
-    echo -e " Общее время: ${BLUE}$total_duration${NC} секунд"
-    echo ""
-    echo -e "📁 Результаты сохранены в: ${YELLOW}$HOST_OUTPUT_DIR${NC}"
-    echo -e "📋 Логи сохранены в: ${YELLOW}$LOGS_DIR${NC}"
-    echo ""
+    {
+        echo "==============================================================================="
+        echo -e "${GREEN}ПОЛНАЯ КОНВЕРТАЦИЯ ЗАВЕРШЕНА${NC}"
+        echo "==============================================================================="
+        echo -e "📊 Статистика обработки:"
+        echo -e " Успешно конвертировано: ${GREEN}$processed${NC} файлов"
+        echo -e " Ошибок: ${RED}$failed${NC} файлов"
+        echo -e " Общее время: ${BLUE}$total_duration${NC} секунд"
+        echo ""
+        echo -e "📁 Результаты сохранены в: ${YELLOW}$HOST_OUTPUT_DIR${NC}"
+        echo -e "📋 Логи сохранены в: ${YELLOW}$LOGS_DIR${NC}"
+        echo ""
+    } >&2
 
     if [ $failed -gt 0 ]; then
         echo -e "${YELLOW}⚠️ Диагностика проблем:${NC}"
@@ -480,11 +484,31 @@ process_batch() {
             echo " - Проверьте статус всех DAG в проекте"
         fi
     else
-        echo -e "${GREEN}🎉 Все файлы успешно конвертированы!${NC}"
-        echo ""
-        echo "Следующие шаги:"
-        echo " - Файлы готовы к использованию"
-        echo " - Для перевода: ./translate-documents.sh [язык]"
+        echo -e "${GREEN}🎉 Все файлы успешно конвертированы!${NC}" >&2
+        >&2 echo ""
+        echo "Следующие шаги:" >&2
+        echo " - Файлы готовы к использованию" >&2
+        echo " - Для перевода: ./translate-documents.sh [язык]" >&2
+    fi
+
+    if [[ "$CONVERSION_BACKEND" == "local" && ${#success_summaries[@]} -gt 0 ]]; then
+        >&2 echo ""
+        echo "📌 Конвертированные файлы:" >&2
+        for summary in "${success_summaries[@]}"; do
+            local md_path metadata_path raw_text_path
+            md_path=$(echo "$summary" | jq -r '.output_markdown')
+            metadata_path=$(echo "$summary" | jq -r '.metadata_file // empty')
+            raw_text_path=$(echo "$summary" | jq -r '.raw_text_file // empty')
+            echo " - Markdown: $md_path" >&2
+            if [[ -n "$metadata_path" ]]; then
+                echo "   Метаданные: $metadata_path" >&2
+            fi
+            if [[ -n "$raw_text_path" ]]; then
+                echo "   Текст: $raw_text_path" >&2
+            fi
+        done
+        >&2 echo ""
+        echo "Для повторной конвертации можно установить LOCAL_OVERWRITE_OUTPUT=true" >&2
     fi
 
     if [[ "$CONVERSION_BACKEND" == "local" && ${#success_summaries[@]} -gt 0 ]]; then
