@@ -142,6 +142,25 @@ class DoclingProcessor:
         # ✅ ИСПРАВЛЕНО: Инициализируем базовый конвертер БЕЗ OCR
         self._initialize_base_converter()
 
+        # ✅ ИНИЦИАЛИЗИРУЕМ CHUNKER, ЕСЛИ ДОСТУПНЫ НЕОБХОДИМЫЕ ЗАВИСИМОСТИ
+        try:
+            self._initialize_chunker()
+        except Exception as chunker_error:
+            logger.warning(
+                "Chunker initialization failed during startup",
+                error=str(chunker_error),
+            )
+
+        if self.chunker is not None:
+            logger.info("Chunker status: enabled")
+        else:
+            status_msg = (
+                "Chunker status: skipped (transformers not available)"
+                if not HF_TRANSFORMERS_AVAILABLE
+                else "Chunker status: disabled"
+            )
+            logger.info(status_msg)
+
         logger.info("DoclingProcessor initialized with conditional OCR loading")
 
     def _resolve_image_bytes(self, payload: Any) -> Optional[bytes]:
