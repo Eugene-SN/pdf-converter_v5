@@ -6,22 +6,28 @@
 
 $ErrorActionPreference = "Stop"
 
+# Resolve exact git executable (avoids PATH issues)
+$gitExe = (Get-Command git -ErrorAction Stop).Source
+
 function Run-Git {
   param(
-    [string[]] $Args,
+    [string[]] $GitArgs,
     [switch]   $Quiet
   )
+  if ($null -eq $GitArgs -or $GitArgs.Count -eq 0) {
+    throw "[GIT] Empty argument list"
+  }
   if ($Quiet) {
-    & git @Args | Out-Null
+    & $gitExe @GitArgs | Out-Null
   } else {
-    & git @Args
+    & $gitExe @GitArgs
   }
   if ($LASTEXITCODE -ne 0) {
-    throw "[GIT] Command failed: git $($Args -join ' ')"
+    throw "[GIT] Command failed: git $($GitArgs -join ' ')"
   }
 }
 
-# 0) Ensure repo (и что git в PATH)
+# 0) Ensure repo (and git available)
 Run-Git @('rev-parse','--is-inside-work-tree') -Quiet
 
 # 1) Clipboard
@@ -31,7 +37,7 @@ if ([string]::IsNullOrWhiteSpace($raw)) { throw "[ERR] Clipboard is empty." }
 # 2) Normalize newlines
 $raw = $raw -replace "`r`n","`n" -replace "`r","`n"
 
-# 3) Remove common invisible chars at the very beginning of the WHOLE text
+# 3) Remove common invisible chars at the VERY beginning of text
 #    BOM U+FEFF, ZWSP U+200B, LRM U+200E, RLM U+200F, NBSP U+00A0
 $raw = $raw -replace "^[`uFEFF`u200B`u200E`u200F`u00A0]+", ""
 
@@ -40,7 +46,7 @@ $raw = $raw -replace "(?s)^\s*```[a-zA-Z0-9_-]*\s*", ""
 $raw = $raw -replace "(?s)\s*```\s*$", ""
 $raw = $raw.Trim()
 
-# 5) Remove invisible chars at the START OF EACH LINE (не трогаем обычные пробелы)
+# 5) Remove the same invisible chars at START OF EACH LINE (не трогаем обычные пробелы)
 $raw = [regex]::Replace($raw, "(?m)^[`uFEFF`u200B`u200E`u200F`u00A0]+", "")
 
 # 6) Keep from first 'From <sha>' or 'diff --git'
@@ -49,7 +55,7 @@ $diff = [regex]::Match($raw, "(?m)^\s*diff --git\s")
 if     ($from.Success) { $raw = $raw.Substring($from.Index) }
 elseif ($diff.Success) { $raw = $raw.Substring($diff.Index) }
 else {
-  # Try to synthesize a 'diff --git' header from +++/--- lines (best-effort).
+  # Best-effort: synthesize a 'diff --git' header from +++ line
   $plus = [regex]::Match($raw, "(?m)^\s*\+\+\+\s+b/([^\r\n]+)")
   if ($plus.Success) {
     $path = $plus.Groups[1].Value.Trim()
@@ -57,7 +63,7 @@ else {
   }
 }
 
-# 7) Must have at least one hunk @@ (allow leading invisible/space)
+# 7) Require at least one hunk '@@'
 if ($raw -notmatch "(?m)^\s*@@") {
   $preview = (($raw -split "`n") | Select-Object -First 20) -join "`n"
   throw "[ERR] No hunks found (^\s*@@). The clipboard likely contains headers only or was mangled by formatting.`n--- Preview ---`n$preview"
@@ -70,7 +76,7 @@ Write-Host "[i] Patch saved to $tmp"
 
 # 9) Diagnostics
 $lines = $raw -split "`n"
-$first4 = ($lines | Select-Object -First 4) -join "`n"
+$first4   = ($lines | Select-Object -First 4) -join "`n"
 $firstHunk = ($lines | Where-Object { $_ -match "^\s*@@" } | Select-Object -First 1)
 Write-Host "[i] First lines:`n$first4"
 if ($firstHunk) { Write-Host "[i] First hunk line: $firstHunk" }
@@ -83,41 +89,41 @@ $unified   = ($raw -match "(?m)^\s*diff --git\s")
 try {
   if ($gitFormat) {
     Write-Host "[i] Trying: git am -3"
-    Run-Git @('am','-3',$tmp)
+    Run-Git @('am','-3',"$tmp")
     Write-Host "[OK] Applied via git am"
   } else {
     Write-Host "[i] Trying: git apply --check/--whitespace=fix"
     # check (verbose if fails)
-    & git apply --check --whitespace=fix "$tmp"
+    & $gitExe apply --check --whitespace=fix "$tmp"
     if ($LASTEXITCODE -ne 0) {
       Write-Host "[i] git apply --check failed, verbose output:"
-      & git apply -v --check --whitespace=fix "$tmp"
+      & $gitExe apply -v --check --whitespace=fix "$tmp"
       throw "[GIT] git apply --check failed"
     }
-    Run-Git @('apply','--whitespace=fix',$tmp)
+    Run-Git @('apply','--whitespace=fix',"$tmp")
     Run-Git @('add','-A')
-    & git commit -m "Apply patch from Codex" | Out-Null
+    & $gitExe commit -m "Apply patch from Codex" | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "[GIT] Commit failed (possibly empty patch)." }
     Write-Host "[OK] Applied via git apply"
   }
 }
 catch {
-  if ($gitFormat) { & git am --abort | Out-Null }
+  if ($gitFormat) { & $gitExe am --abort | Out-Null }
   Write-Host "[i] Falling back to: git apply --reject"
-  & git apply --reject --whitespace=fix "$tmp"
+  & $gitExe apply --reject --whitespace=fix "$tmp"
   if ($LASTEXITCODE -ne 0) {
     Write-Host "[i] git apply --reject failed, verbose output:"
-    & git apply -v --reject --whitespace=fix "$tmp"
+    & $gitExe apply -v --reject --whitespace=fix "$tmp"
     throw "[GIT] git apply --reject failed"
   }
   Run-Git @('add','-A')
-  & git commit -m "Apply patch from Codex (with rejects)" | Out-Null
+  & $gitExe commit -m "Apply patch from Codex (with rejects)" | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "[GIT] Commit failed after rejects." }
   Write-Host "[OK] Applied via git apply --reject (check *.rej if any)"
 }
 
 # 12) Sync explicitly
-& git pull --rebase --autostash origin main | Out-Null
+& $gitExe pull --rebase --autostash origin main | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "[GIT] pull --rebase failed." }
 Run-Git @('push','origin','HEAD:main')
 
