@@ -4,8 +4,6 @@
     {
       "label": "Codex: Apply patch & Push (auto, cross-platform)",
       "type": "shell",
-
-      // Значения по умолчанию — для macOS / Linux:
       "command": "./apply_patch_mac.sh",
       "options": {
         "shell": {
@@ -13,14 +11,14 @@
           "args": ["-lc"]
         }
       },
-
-      // Переопределения только для Windows:
       "windows": {
         "command": "powershell",
         "args": [
           "-NoProfile",
-          "-ExecutionPolicy", "Bypass",
-          "-File", "${workspaceFolder}\\apply_patch_win.ps1"
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          "${workspaceFolder}\\apply_patch_win.ps1"
         ],
         "options": {
           "shell": {
@@ -28,7 +26,6 @@
           }
         }
       },
-
       "problemMatcher": [],
       "group": { "kind": "build", "isDefault": true }
     }
