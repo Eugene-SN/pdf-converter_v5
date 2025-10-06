@@ -132,6 +132,7 @@ full_pdf_processing() {
     local output_dir="$3"
 
     log "INFO" "🚀 Запуск полной обработки PDF → $lang_name"
+    log "INFO" "⚙️ OCR для этого запуска: $TRANSLATOR_ENABLE_OCR_BOOL"
 
     # Поиск PDF файлов
     local pdf_files=()
@@ -349,10 +350,14 @@ translate_single_md() {
 # Сценарий 5: Только конвертация
 convert_only() {
     log "INFO" "🔄 Запуск конвертации PDF → MD (без перевода)"
+    log "INFO" "⚙️ OCR для этого запуска: $TRANSLATOR_ENABLE_OCR_BOOL"
 
-    # Используем основной скрипт конвертации
     if [ -f "$SCRIPT_DIR/convert-pdf-to-markdown.sh" ]; then
-        bash "$SCRIPT_DIR/convert-pdf-to-markdown.sh"
+        CONVERTER_ENABLE_OCR="$TRANSLATOR_ENABLE_OCR_BOOL" \
+        CONVERTER_LOG_FILE="$(log_file_path)" \
+        bash "$SCRIPT_DIR/convert-pdf-to-markdown.sh" \
+            --enable-ocr="$TRANSLATOR_ENABLE_OCR_BOOL" \
+            --log-file "$(log_file_path)"
     else
         log "ERROR" "❌ Скрипт convert-pdf-to-markdown.sh не найден"
         echo "Создайте скрипт конвертации или запустите полную обработку"

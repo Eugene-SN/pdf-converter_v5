@@ -87,6 +87,22 @@ HEADING_PATTERNS: List[str] = [
     r'^[\u4e00-\u9fff]+[:：]',
 ]
 
+# ✅ Вспомогательные функции окружения
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {'1', 'true', 't', 'yes', 'y', 'on'}:
+        return True
+    if normalized in {'0', 'false', 'f', 'no', 'n', 'off'}:
+        return False
+    return default
+
+
+STRICT_CONVERSION_MODE = _env_flag('STRICT_CONVERSION_MODE', True)
+
+
 # ✅ vLLM конфигурация
 VLLM_CONFIG: Dict[str, Any] = {
     # Используем имя сервиса Docker Compose для корректного DNS
@@ -162,6 +178,9 @@ ENHANCEMENT_CONFIG: Dict[str, Any] = {
     'preserve_chinese_terms': True,
     'technical_focus': True,
 }
+
+if STRICT_CONVERSION_MODE:
+    ENHANCEMENT_CONFIG['enable_vllm_enhancement'] = False
 
 # ================================================================================
 # ДОКУМЕНТНЫЕ УТИЛИТЫ
@@ -326,22 +345,30 @@ def load_intermediate_data(**context) -> Dict[str, Any]:
             document_title = Path(intermediate_file).stem.replace('_intermediate', '')
             document_data['title'] = document_title
 
+        vllm_requested = dag_run_conf.get('vllm_enhancement', True)
+        if STRICT_CONVERSION_MODE and vllm_requested:
+            logger.info("STRICT MODE: vLLM улучшения отключены")
+
         transformation_session: Dict[str, Any] = {
             'session_id': f"transform_{int(time.time())}",
             'document_data': document_data,
             'original_config': dag_run_conf.get('original_config', {}),
             'intermediate_file': intermediate_file,
             'transformation_start_time': datetime.now().isoformat(),
-            'vllm_enhancement_enabled': dag_run_conf.get('vllm_enhancement', True),
+            'vllm_enhancement_enabled': bool(vllm_requested) and not STRICT_CONVERSION_MODE,
             'chunking_config': CHUNKING_CONFIG,
             'enhancement_config': ENHANCEMENT_CONFIG,
             'preserve_terms': PRESERVE_TERMS,
             'document_type': 'chinese_technical',
             'document_title': document_title,
+            'strict_mode': STRICT_CONVERSION_MODE,
         }
 
         content_length = len(document_data.get('markdown_content', ''))
         logger.info(f"✅ Данные загружены для полной трансформации: {content_length} символов")
+
+        if STRICT_CONVERSION_MODE:
+            logger.info("STRICT MODE активирован: контент будет сохранён без агрессивных трансформаций")
 
         MetricsUtils.record_processing_metrics(
             dag_id='content_transformation',
@@ -376,18 +403,26 @@ def perform_basic_transformations(**context) -> Dict[str, Any]:
             logger.info("⚠️ Markdown без заголовков – формируем контент из структурных данных")
             original_content = build_markdown_from_sections(document_data)
 
-        logger.info("📝 Применение китайских трансформаций")
-        transformed_content = apply_chinese_transformations(original_content)
+        strict_mode = transformation_session.get('strict_mode', STRICT_CONVERSION_MODE)
 
-        logger.info("🏗️ Улучшение структуры документа")
-        structured_content = improve_document_structure(
-            transformed_content,
-            document_title=transformation_session.get('document_title'),
-            sections=document_data.get('sections')
-        )
+        if strict_mode:
+            logger.info("STRICT MODE: пропускаем дополнительные преобразования Markdown")
+            transformed_content = original_content
+            structured_content = transformed_content
+            final_content = structured_content
+        else:
+            logger.info("📝 Применение китайских трансформаций")
+            transformed_content = apply_chinese_transformations(original_content)
 
-        logger.info("🎨 Финальное базовое форматирование")
-        final_content = finalize_basic_formatting(structured_content)
+            logger.info("🏗️ Улучшение структуры документа")
+            structured_content = improve_document_structure(
+                transformed_content,
+                document_title=transformation_session.get('document_title'),
+                sections=document_data.get('sections')
+            )
+
+            logger.info("🎨 Финальное базовое форматирование")
+            final_content = finalize_basic_formatting(structured_content)
         final_content, fence_fixed = normalize_code_fences(final_content)
         if fence_fixed:
             logger.info("🔧 Базовый контент дополнен закрывающей тройной кавычкой")

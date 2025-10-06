@@ -492,25 +492,30 @@ def perform_visual_comparison(**context) -> Dict[str, Any]:
             'differences_count': 0,
             'issues_found': [],
             'processing_time': 0.0,
-            'pandoc_integration': True
+            'pandoc_integration': True,
+            'pandoc_backend': None,
         }
-        
+
         if not original_pdf_path or not os.path.exists(original_pdf_path):
             raise AirflowException(f"Original PDF not found: {original_pdf_path}")
 
-        if not check_docker_pandoc_availability():
-            logger.warning("Docker Pandoc unavailable — skipping visual comparison")
+        backend = resolve_pandoc_backend()
+        validation_result['pandoc_backend'] = backend
+
+        if backend == 'none':
+            logger.warning("Pandoc backend unavailable — skipping visual comparison")
             validation_result.update({
-                'validation_score': 0.7,
-                'issues_found': validation_result['issues_found'] + ['Docker Pandoc service unavailable'],
+                'validation_score': 0.6,
+                'issues_found': validation_result['issues_found'] + ['Pandoc backend unavailable'],
                 'skipped': True,
+                'pandoc_integration': False,
                 'processing_time': time.time() - start_time,
             })
             return validation_result
 
-        result_pdf_path = generate_result_pdf_via_docker_pandoc(document_content, document_id)
+        result_pdf_path = generate_result_pdf(document_content, document_id, backend)
         if not result_pdf_path or not os.path.exists(result_pdf_path):
-            logger.warning("Failed to generate result PDF via Docker Pandoc — visual comparison skipped")
+            logger.warning("Failed to generate result PDF via %s backend — visual comparison skipped", backend)
             validation_result.update({
                 'validation_score': 0.6,
                 'issues_found': validation_result['issues_found'] + ['Result PDF generation failed'],
@@ -562,69 +567,133 @@ def perform_visual_comparison(**context) -> Dict[str, Any]:
         logger.error(f"❌ Ошибка уровня 2 визуального сравнения: {e}")
         raise
 
-def check_docker_pandoc_availability() -> bool:
-    """✅ ИСПРАВЛЕНА: Проверка доступности Docker Pandoc сервиса"""
+
+
+def resolve_pandoc_backend() -> str:
+    """Определяет доступный backend для генерации PDF."""
+    if _docker_pandoc_available():
+        return 'docker'
+    local_path = _local_pandoc_available()
+    if local_path:
+        return 'local'
+    return 'none'
+
+
+def _docker_pandoc_available() -> bool:
     try:
-        # Проверяем что Docker Pandoc контейнер запущен и отвечает
         result = subprocess.run(
             ['docker', 'exec', 'pandoc-render', 'pandoc', '--version'],
-            capture_output=True, text=True, timeout=10
+            capture_output=True,
+            text=True,
+            timeout=10
         )
-        
-        if result.returncode == 0:
-            logger.info("✅ Docker Pandoc service is available")
-            return True
-        else:
-            logger.warning("❌ Docker Pandoc service is not responding")
-            return False
-            
-    except Exception as e:
-        logger.error(f"Error checking Docker Pandoc availability: {e}")
+    except FileNotFoundError:
+        logger.info("docker binary not found; skipping Docker Pandoc backend")
+        return False
+    except Exception as exc:
+        logger.warning("Docker Pandoc availability check failed: %s", exc)
         return False
 
-def generate_result_pdf_via_docker_pandoc(markdown_content: str, document_id: str) -> Optional[str]:
-    """✅ ИСПРАВЛЕНА: Генерация PDF через Docker Pandoc сервис"""
+    if result.returncode == 0:
+        logger.info("✅ Docker Pandoc service is available")
+        return True
+
+    logger.warning("❌ Docker Pandoc service is not responding")
+    return False
+
+
+def _local_pandoc_available() -> Optional[str]:
+    pandoc_path = shutil.which('pandoc')
+    if not pandoc_path:
+        return None
     try:
-        logger.info(f"Generating result PDF via Docker Pandoc service for document: {document_id}")
-        
-        # Проверяем доступность Docker Pandoc сервиса
-        if not check_docker_pandoc_availability():
-            logger.warning("Docker Pandoc service not available, skipping PDF generation")
-            return None
-        
-        # Используем общие временные директории, монтированные в Docker
-        temp_dir = Path("/opt/airflow/temp") / document_id
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        
-        md_file = temp_dir / f"{document_id}_result.md"
-        pdf_file = temp_dir / f"{document_id}_result.pdf"
-        
-        # Записываем Markdown файл
-        with open(md_file, 'w', encoding='utf-8') as f:
-            f.write(markdown_content)
-        
-        # ✅ ИСПРАВЛЕНО: Вызов через Docker exec в pandoc-render контейнер
-        # Учитываем монтирование: /opt/airflow/temp -> /workspace в pandoc-render
+        check = subprocess.run(
+            [pandoc_path, '--version'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if check.returncode == 0:
+            logger.info("✅ Local pandoc binary detected: %s", pandoc_path)
+            return pandoc_path
+    except Exception as exc:
+        logger.warning("Local pandoc check failed: %s", exc)
+    return None
+
+
+def generate_result_pdf(markdown_content: str, document_id: str, backend: str) -> Optional[str]:
+    """Генерирует PDF с использованием доступного backend."""
+    temp_dir = Path("/opt/airflow/temp") / document_id
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    md_file = temp_dir / f"{document_id}_result.md"
+    pdf_file = temp_dir / f"{document_id}_result.pdf"
+
+    try:
+        with open(md_file, 'w', encoding='utf-8') as handle:
+            handle.write(markdown_content)
+    except Exception as exc:
+        logger.error("Не удалось записать промежуточный Markdown: %s", exc)
+        return None
+
+    if backend == 'docker':
         docker_cmd = [
             'docker', 'exec', 'pandoc-render',
             'python3', '/app/render_pdf.py',
-            f'/workspace/{document_id}/{document_id}_result.md',  # Путь внутри контейнера
-            f'/workspace/{document_id}/{document_id}_result.pdf', # Путь внутри контейнера  
-            '/app/templates/chinese_tech.latex'      # LaTeX шаблон
+            f'/workspace/{document_id}/{document_id}_result.md',
+            f'/workspace/{document_id}/{document_id}_result.pdf',
+            '/app/templates/chinese_tech.latex'
         ]
-        
-        result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=120)
-        
-        if result.returncode == 0 and pdf_file.exists():
-            logger.info(f"✅ Result PDF создан через Docker Pandoc: {pdf_file}")
-            return str(pdf_file)
-        else:
-            logger.warning(f"Docker Pandoc conversion failed: {result.stderr}")
-            return None
-            
-    except Exception as e:
-        logger.error(f"PDF generation via Docker Pandoc failed: {e}")
-        return None
+        try:
+            result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode == 0 and pdf_file.exists():
+                logger.info("✅ Result PDF создан через Docker Pandoc: %s", pdf_file)
+                return str(pdf_file)
+            logger.warning("Docker Pandoc conversion failed: %s", result.stderr)
+        except FileNotFoundError:
+            logger.warning("docker binary not available during PDF generation")
+        except Exception as exc:
+            logger.warning("Docker Pandoc execution failed: %s", exc)
+
+    if backend in {'local', 'docker'}:
+        pandoc_path = _local_pandoc_available()
+        if pandoc_path:
+            try:
+                cmd = [pandoc_path, str(md_file), '-o', str(pdf_file)]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                if result.returncode == 0 and pdf_file.exists():
+                    logger.info("✅ Result PDF создан локальным pandoc: %s", pdf_file)
+                    return str(pdf_file)
+                logger.warning("Local pandoc conversion failed: %s", result.stderr)
+            except Exception as exc:
+                logger.warning("Local pandoc execution failed: %s", exc)
+
+    if _render_pdf_with_weasyprint(markdown_content, pdf_file):
+        logger.info("✅ Result PDF создан через WeasyPrint fallback: %s", pdf_file)
+        return str(pdf_file)
+
+    return None
+
+
+def _render_pdf_with_weasyprint(markdown_content: str, pdf_path: Path) -> bool:
+    try:
+        from weasyprint import HTML  # type: ignore
+    except ImportError:
+        return False
+
+    try:
+        try:
+            import markdown as md  # type: ignore
+            html_content = md.markdown(markdown_content)
+        except ImportError:
+            from html import escape
+            html_content = f"<pre>{escape(markdown_content)}</pre>"
+
+        HTML(string=html_content).write_pdf(str(pdf_path))
+        return pdf_path.exists()
+    except Exception as exc:
+        logger.warning("WeasyPrint fallback failed: %s", exc)
+        return False
 
 # ================================================================================
 # УРОВЕНЬ 3: AST STRUCTURE COMPARISON (СОХРАНЕН)

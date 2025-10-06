@@ -109,6 +109,12 @@ trigger_full_conversion() {
     timestamp=$(date +%s)
 
     log "INFO" "🚀 Запуск полной конвертации: $filename"
+    local enable_ocr_flag="$CONVERTER_ENABLE_OCR_BOOL"
+    if [[ "$enable_ocr_flag" == "true" ]]; then
+        log "INFO" "⚙️ OCR включен во входной конфигурации"
+    else
+        log "INFO" "⚙️ OCR отключен во входной конфигурации"
+    fi
 
     # ИСПРАВЛЕНО: Используем jq для корректного JSON
     local config_json
@@ -118,7 +124,7 @@ trigger_full_conversion() {
         --argjson timestamp $timestamp \
         --arg target_language "original" \
         --arg quality_level "high" \
-        --argjson enable_ocr true \
+        --argjson enable_ocr "$enable_ocr_flag" \
         --argjson preserve_structure true \
         --argjson extract_tables true \
         --argjson extract_images true \
