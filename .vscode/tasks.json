@@ -2,17 +2,35 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Codex: Apply patch & Push",
+      "label": "Codex: Apply patch & Push (auto, cross-platform)",
       "type": "shell",
-      "command": "./apply_patch.sh",
-      "problemMatcher": [],
-      "group": { "kind": "build", "isDefault": true },
+
+      // Значения по умолчанию — для macOS / Linux:
+      "command": "./apply_patch_mac.sh",
       "options": {
         "shell": {
           "executable": "/bin/zsh",
           "args": ["-lc"]
         }
-      }
+      },
+
+      // Переопределения только для Windows:
+      "windows": {
+        "command": "powershell",
+        "args": [
+          "-NoProfile",
+          "-ExecutionPolicy", "Bypass",
+          "-File", "${workspaceFolder}\\apply_patch_win.ps1"
+        ],
+        "options": {
+          "shell": {
+            "executable": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+          }
+        }
+      },
+
+      "problemMatcher": [],
+      "group": { "kind": "build", "isDefault": true }
     }
   ]
 }
