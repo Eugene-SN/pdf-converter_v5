@@ -49,6 +49,35 @@ $raw = $raw.Trim()
 # 5) Remove the same invisible chars at START OF EACH LINE (не трогаем обычные пробелы)
 $raw = [regex]::Replace($raw, "(?m)^[`uFEFF`u200B`u200E`u200F`u00A0]+", "")
 
+# 5.1) Heuristic: if there are no (or almost no) newlines, try to reflow a single-line patch
+$lineCount = ($raw -split "`n").Length
+if ($lineCount -le 2) {
+  Write-Host "[i] Heuristic reflow: input looks like a single line, trying to insert newlines…"
+
+  # put a leading space to simplify "space + token" matching
+  $s = " " + ($raw -replace "\s+", " ").Trim()
+
+  # insert line breaks before typical diff tokens (order matters)
+  $patterns = @(
+    ' diff --git ',
+    ' new file mode ',
+    ' index ',
+    ' --- ',
+    ' \+\+\+ ',
+    ' @@ ',
+    ' \+[^\s]'   # start of added content line
+  )
+
+  foreach ($p in $patterns) {
+    $s = [regex]::Replace($s, $p, { param($m) "`n" + $m.Value.TrimStart() })
+  }
+
+  # cleanup: collapse multiple newlines and trim
+  $s = $s -replace "(`n)\s+","`n"
+  $s = $s -replace "`n{2,}","`n"
+  $raw = $s.Trim()
+}
+
 # 6) Keep from first 'From <sha>' or 'diff --git'
 $from = [regex]::Match($raw, "(?m)^\s*From [0-9a-f]{40}\b")
 $diff = [regex]::Match($raw, "(?m)^\s*diff --git\s")
