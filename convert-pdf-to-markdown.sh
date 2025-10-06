@@ -43,7 +43,7 @@ LOCAL_EXPORT_RAW_TEXT="${LOCAL_EXPORT_RAW_TEXT:-false}"
 LOCAL_OVERWRITE_OUTPUT="${LOCAL_OVERWRITE_OUTPUT:-false}"
 LOCAL_CONVERTER_VERBOSE="${LOCAL_CONVERTER_VERBOSE:-false}"
 LOCAL_OCR_LANGUAGES="${LOCAL_OCR_LANGUAGES:-eng}"
-LOCAL_CONVERTER_MODULE="${LOCAL_CONVERTER_MODULE:-document_processor.local_converter}"
+LOCAL_CONVERTER_MODULE="document_processor.local_converter"
 
 # Создание директорий
 mkdir -p "$HOST_INPUT_DIR" "$HOST_OUTPUT_DIR" "$HOST_METADATA_DIR" "$LOGS_DIR"
@@ -70,28 +70,26 @@ log() {
 }
 
 show_header() {
-    {
-        echo -e "${BLUE}"
-        echo "==============================================================================="
-        echo " PDF CONVERTER PIPELINE v2.0 - ИСПРАВЛЕНА JSON ПРОБЛЕМА"
-        echo "==============================================================================="
-        echo -e "${NC}"
-        echo "🎯 Цель: PDF → Markdown с 5-уровневой валидацией качества"
-        echo "📂 Входная папка: $HOST_INPUT_DIR"
-        echo "📁 Выходная папка: $HOST_OUTPUT_DIR"
-        echo "🔄 Этапы:"
-        echo " 1️⃣ Document Preprocessing (Извлечение контента)"
-        echo " 2️⃣ Content Transformation (Преобразование в Markdown)"
-        echo " 3️⃣ Quality Assurance (5-уровневая валидация)"
-        echo ""
-        echo "⚙️ Режим работы: $CONVERSION_BACKEND"
-        if [[ "$CONVERSION_BACKEND" == "local" ]]; then
-            echo "   ➤ Используется локальный Docling конвертер без OCR по умолчанию"
-        else
-            echo "   ➤ Используется Airflow оркестратор"
-        fi
-        echo ""
-    } >&2
+    echo -e "${BLUE}"
+    echo "==============================================================================="
+    echo " PDF CONVERTER PIPELINE v2.0 - ИСПРАВЛЕНА JSON ПРОБЛЕМА"
+    echo "==============================================================================="
+    echo -e "${NC}"
+    echo "🎯 Цель: PDF → Markdown с 5-уровневой валидацией качества"
+    echo "📂 Входная папка: $HOST_INPUT_DIR"
+    echo "📁 Выходная папка: $HOST_OUTPUT_DIR"
+    echo "🔄 Этапы:"
+    echo " 1️⃣ Document Preprocessing (Извлечение контента)"
+    echo " 2️⃣ Content Transformation (Преобразование в Markdown)"
+    echo " 3️⃣ Quality Assurance (5-уровневая валидация)"
+    echo ""
+    echo "⚙️ Режим работы: $CONVERSION_BACKEND"
+    if [[ "$CONVERSION_BACKEND" == "local" ]]; then
+        echo "   ➤ Используется локальный Docling конвертер без OCR по умолчанию"
+    else
+        echo "   ➤ Используется Airflow оркестратор"
+    fi
+    echo ""
 }
 
 check_services() {
@@ -430,25 +428,25 @@ process_batch() {
     for pdf_file in "${pdf_files[@]}"; do
         local filename
         filename=$(basename "$pdf_file")
-        echo -e "${BLUE}[ФАЙЛ $((processed + failed + 1))/$total_files]${NC} $filename" >&2
+        echo -e "${BLUE}[ФАЙЛ $((processed + failed + 1))/$total_files]${NC} $filename"
 
         if [[ "$CONVERSION_BACKEND" == "local" ]]; then
             local conversion_json
             if conversion_json=$(run_local_conversion "$pdf_file"); then
-                ((processed+=1))
+                ((processed++))
                 success_summaries+=("$conversion_json")
-                echo -e "Статус: ${GREEN}✅ УСПЕШНО КОНВЕРТИРОВАН${NC}" >&2
+                echo -e "Статус: ${GREEN}✅ УСПЕШНО КОНВЕРТИРОВАН${NC}"
             else
-                ((failed+=1))
-                echo -e "Статус: ${RED}❌ ОШИБКА КОНВЕРТАЦИИ${NC}" >&2
+                ((failed++))
+                echo -e "Статус: ${RED}❌ ОШИБКА КОНВЕРТАЦИИ${NC}"
             fi
         else
             if trigger_full_conversion "$pdf_file"; then
-                ((processed+=1))
-                echo -e "Статус: ${GREEN}✅ УСПЕШНО КОНВЕРТИРОВАН${NC}" >&2
+                ((processed++))
+                echo -e "Статус: ${GREEN}✅ УСПЕШНО КОНВЕРТИРОВАН${NC}"
             else
-                ((failed+=1))
-                echo -e "Статус: ${RED}❌ ОШИБКА КОНВЕРТАЦИИ${NC}" >&2
+                ((failed++))
+                echo -e "Статус: ${RED}❌ ОШИБКА КОНВЕРТАЦИИ${NC}"
             fi
         fi
         >&2 echo ""
@@ -474,16 +472,16 @@ process_batch() {
     } >&2
 
     if [ $failed -gt 0 ]; then
-        echo -e "${YELLOW}⚠️ Диагностика проблем:${NC}" >&2
+        echo -e "${YELLOW}⚠️ Диагностика проблем:${NC}"
         if [[ "$CONVERSION_BACKEND" == "local" ]]; then
-            echo " - Проверьте логи конвертера: $(log_file_path)" >&2
-            echo " - Убедитесь, что зависимости docling установлены" >&2
-            echo " - Попробуйте включить LOCAL_CONVERTER_VERBOSE=true для подробностей" >&2
+            echo " - Проверьте логи конвертера: $(log_file_path)"
+            echo " - Убедитесь, что зависимости docling установлены"
+            echo " - Попробуйте включить LOCAL_CONVERTER_VERBOSE=true для подробностей"
         else
-            echo " - Проверьте Airflow UI: $AIRFLOW_URL/dags" >&2
-            echo " - Убедитесь что orchestrator_dag активен" >&2
-            echo " - Проверьте логи: $LOGS_DIR/conversion_*.log" >&2
-            echo " - Проверьте статус всех DAG в проекте" >&2
+            echo " - Проверьте Airflow UI: $AIRFLOW_URL/dags"
+            echo " - Убедитесь что orchestrator_dag активен"
+            echo " - Проверьте логи: $LOGS_DIR/conversion_*.log"
+            echo " - Проверьте статус всех DAG в проекте"
         fi
     else
         echo -e "${GREEN}🎉 Все файлы успешно конвертированы!${NC}" >&2
@@ -511,6 +509,26 @@ process_batch() {
         done
         >&2 echo ""
         echo "Для повторной конвертации можно установить LOCAL_OVERWRITE_OUTPUT=true" >&2
+    fi
+
+    if [[ "$CONVERSION_BACKEND" == "local" && ${#success_summaries[@]} -gt 0 ]]; then
+        echo ""
+        echo "📌 Конвертированные файлы:"
+        for summary in "${success_summaries[@]}"; do
+            local md_path metadata_path raw_text_path
+            md_path=$(echo "$summary" | jq -r '.output_markdown')
+            metadata_path=$(echo "$summary" | jq -r '.metadata_file // empty')
+            raw_text_path=$(echo "$summary" | jq -r '.raw_text_file // empty')
+            echo " - Markdown: $md_path"
+            if [[ -n "$metadata_path" ]]; then
+                echo "   Метаданные: $metadata_path"
+            fi
+            if [[ -n "$raw_text_path" ]]; then
+                echo "   Текст: $raw_text_path"
+            fi
+        done
+        echo ""
+        echo "Для повторной конвертации можно установить LOCAL_OVERWRITE_OUTPUT=true"
     fi
 }
 
@@ -562,11 +580,11 @@ main() {
     fi
 
     if [[ "$CONVERSION_BACKEND" == "local" ]]; then
-        echo -e "${YELLOW}Начинаем локальную конвертацию PDF → Markdown (OCR отключен по умолчанию)${NC}" >&2
+        echo -e "${YELLOW}Начинаем локальную конвертацию PDF → Markdown (OCR отключен по умолчанию)${NC}"
     else
-        echo -e "${YELLOW}Начинаем полную конвертацию PDF → Markdown с валидацией${NC}" >&2
+        echo -e "${YELLOW}Начинаем полную конвертацию PDF → Markdown с валидацией${NC}"
     fi
-    echo -e "${YELLOW}Нажмите Enter для начала или Ctrl+C для отмены...${NC}" >&2
+    echo -e "${YELLOW}Нажмите Enter для начала или Ctrl+C для отмены...${NC}"
     read -r
 
     process_batch
