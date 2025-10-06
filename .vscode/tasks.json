@@ -2,10 +2,10 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Codex: Apply patch & Push (auto, cross-platform)",
+      "label": "Codex: Apply patch & Push (cross-platform)",
       "type": "shell",
-
-      "command": "./apply_patch_mac.sh",
+      "command": "echo",
+      "args": ["Select OS-specific override"],
       "osx": {
         "command": "./apply_patch_mac.sh",
         "options": {
@@ -15,7 +15,6 @@
           }
         }
       },
-
       "windows": {
         "command": "powershell",
         "args": [
@@ -30,9 +29,13 @@
           }
         }
       },
-
       "problemMatcher": [],
-      "group": { "kind": "build", "isDefault": true }
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
     }
   ]
 }
