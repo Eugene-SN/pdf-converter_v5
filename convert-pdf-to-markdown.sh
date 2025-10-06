@@ -43,7 +43,7 @@ LOCAL_EXPORT_RAW_TEXT="${LOCAL_EXPORT_RAW_TEXT:-false}"
 LOCAL_OVERWRITE_OUTPUT="${LOCAL_OVERWRITE_OUTPUT:-false}"
 LOCAL_CONVERTER_VERBOSE="${LOCAL_CONVERTER_VERBOSE:-false}"
 LOCAL_OCR_LANGUAGES="${LOCAL_OCR_LANGUAGES:-eng}"
-LOCAL_CONVERTER_MODULE="document_processor.local_converter"
+LOCAL_CONVERTER_MODULE="${LOCAL_CONVERTER_MODULE:-document_processor.local_converter}"
 
 # Создание директорий
 mkdir -p "$HOST_INPUT_DIR" "$HOST_OUTPUT_DIR" "$HOST_METADATA_DIR" "$LOGS_DIR"
@@ -66,30 +66,32 @@ log() {
     local message="$*"
     local timestamp
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo -e "${BLUE}[$timestamp]${NC} ${YELLOW}[$level]${NC} $message" | tee -a "$(log_file_path)"
+    echo -e "${BLUE}[$timestamp]${NC} ${YELLOW}[$level]${NC} $message" | tee -a "$(log_file_path)" >&2
 }
 
 show_header() {
-    echo -e "${BLUE}"
-    echo "==============================================================================="
-    echo " PDF CONVERTER PIPELINE v2.0 - ИСПРАВЛЕНА JSON ПРОБЛЕМА"
-    echo "==============================================================================="
-    echo -e "${NC}"
-    echo "🎯 Цель: PDF → Markdown с 5-уровневой валидацией качества"
-    echo "📂 Входная папка: $HOST_INPUT_DIR"
-    echo "📁 Выходная папка: $HOST_OUTPUT_DIR"
-    echo "🔄 Этапы:"
-    echo " 1️⃣ Document Preprocessing (Извлечение контента)"
-    echo " 2️⃣ Content Transformation (Преобразование в Markdown)"
-    echo " 3️⃣ Quality Assurance (5-уровневая валидация)"
-    echo ""
-    echo "⚙️ Режим работы: $CONVERSION_BACKEND"
-    if [[ "$CONVERSION_BACKEND" == "local" ]]; then
-        echo "   ➤ Используется локальный Docling конвертер без OCR по умолчанию"
-    else
-        echo "   ➤ Используется Airflow оркестратор"
-    fi
-    echo ""
+    {
+        echo -e "${BLUE}"
+        echo "==============================================================================="
+        echo " PDF CONVERTER PIPELINE v2.0 - ИСПРАВЛЕНА JSON ПРОБЛЕМА"
+        echo "==============================================================================="
+        echo -e "${NC}"
+        echo "🎯 Цель: PDF → Markdown с 5-уровневой валидацией качества"
+        echo "📂 Входная папка: $HOST_INPUT_DIR"
+        echo "📁 Выходная папка: $HOST_OUTPUT_DIR"
+        echo "🔄 Этапы:"
+        echo " 1️⃣ Document Preprocessing (Извлечение контента)"
+        echo " 2️⃣ Content Transformation (Преобразование в Markdown)"
+        echo " 3️⃣ Quality Assurance (5-уровневая валидация)"
+        echo ""
+        echo "⚙️ Режим работы: $CONVERSION_BACKEND"
+        if [[ "$CONVERSION_BACKEND" == "local" ]]; then
+            echo "   ➤ Используется локальный Docling конвертер без OCR по умолчанию"
+        else
+            echo "   ➤ Используется Airflow оркестратор"
+        fi
+        echo ""
+    } >&2
 }
 
 check_services() {
@@ -338,7 +340,7 @@ wait_for_completion() {
                 ;;
             "running")
                 local progress_msg="Выполняется (${elapsed}s)"
-                printf "\r${YELLOW}[КОНВЕРТАЦИЯ]${NC} $progress_msg "
+                printf "\r${YELLOW}[КОНВЕРТАЦИЯ]${NC} $progress_msg " >&2
                 sleep 10
                 ;;
             *)
@@ -379,7 +381,9 @@ show_completion_results() {
 
             # Показать первые несколько строк
             log "INFO" "📖 Превью содержимого:"
-            head -5 "$latest_file" | sed 's/^/  /'
+            while IFS= read -r preview_line; do
+                log "INFO" "  $preview_line"
+            done < <(head -5 "$latest_file")
         else
             log "WARN" "⚠️ Качество: Файл может быть слишком коротким"
         fi
@@ -409,12 +413,12 @@ process_batch() {
 
     if [ $total_files -eq 0 ]; then
         log "WARN" "📂 Нет PDF файлов в $HOST_INPUT_DIR"
-        echo "Поместите PDF файлы в папку $HOST_INPUT_DIR и запустите снова"
+        log "INFO" "Поместите PDF файлы в папку $HOST_INPUT_DIR и запустите снова"
         return 0
     fi
 
     log "INFO" "📊 Найдено файлов для конвертации: $total_files"
-    echo ""
+    >&2 echo ""
 
     # Обработка файлов
     local processed=0
@@ -426,28 +430,28 @@ process_batch() {
     for pdf_file in "${pdf_files[@]}"; do
         local filename
         filename=$(basename "$pdf_file")
-        echo -e "${BLUE}[ФАЙЛ $((processed + failed + 1))/$total_files]${NC} $filename"
+        echo -e "${BLUE}[ФАЙЛ $((processed + failed + 1))/$total_files]${NC} $filename" >&2
 
         if [[ "$CONVERSION_BACKEND" == "local" ]]; then
             local conversion_json
             if conversion_json=$(run_local_conversion "$pdf_file"); then
-                ((processed++))
+                ((processed+=1))
                 success_summaries+=("$conversion_json")
-                echo -e "Статус: ${GREEN}✅ УСПЕШНО КОНВЕРТИРОВАН${NC}"
+                echo -e "Статус: ${GREEN}✅ УСПЕШНО КОНВЕРТИРОВАН${NC}" >&2
             else
-                ((failed++))
-                echo -e "Статус: ${RED}❌ ОШИБКА КОНВЕРТАЦИИ${NC}"
+                ((failed+=1))
+                echo -e "Статус: ${RED}❌ ОШИБКА КОНВЕРТАЦИИ${NC}" >&2
             fi
         else
             if trigger_full_conversion "$pdf_file"; then
-                ((processed++))
-                echo -e "Статус: ${GREEN}✅ УСПЕШНО КОНВЕРТИРОВАН${NC}"
+                ((processed+=1))
+                echo -e "Статус: ${GREEN}✅ УСПЕШНО КОНВЕРТИРОВАН${NC}" >&2
             else
-                ((failed++))
-                echo -e "Статус: ${RED}❌ ОШИБКА КОНВЕРТАЦИИ${NC}"
+                ((failed+=1))
+                echo -e "Статус: ${RED}❌ ОШИБКА КОНВЕРТАЦИИ${NC}" >&2
             fi
         fi
-        echo ""
+        >&2 echo ""
     done
 
     # Итоговая статистика
@@ -455,56 +459,58 @@ process_batch() {
     end_time=$(date +%s)
     local total_duration=$((end_time - start_time))
 
-    echo "==============================================================================="
-    echo -e "${GREEN}ПОЛНАЯ КОНВЕРТАЦИЯ ЗАВЕРШЕНА${NC}"
-    echo "==============================================================================="
-    echo -e "📊 Статистика обработки:"
-    echo -e " Успешно конвертировано: ${GREEN}$processed${NC} файлов"
-    echo -e " Ошибок: ${RED}$failed${NC} файлов"
-    echo -e " Общее время: ${BLUE}$total_duration${NC} секунд"
-    echo ""
-    echo -e "📁 Результаты сохранены в: ${YELLOW}$HOST_OUTPUT_DIR${NC}"
-    echo -e "📋 Логи сохранены в: ${YELLOW}$LOGS_DIR${NC}"
-    echo ""
+    {
+        echo "==============================================================================="
+        echo -e "${GREEN}ПОЛНАЯ КОНВЕРТАЦИЯ ЗАВЕРШЕНА${NC}"
+        echo "==============================================================================="
+        echo -e "📊 Статистика обработки:"
+        echo -e " Успешно конвертировано: ${GREEN}$processed${NC} файлов"
+        echo -e " Ошибок: ${RED}$failed${NC} файлов"
+        echo -e " Общее время: ${BLUE}$total_duration${NC} секунд"
+        echo ""
+        echo -e "📁 Результаты сохранены в: ${YELLOW}$HOST_OUTPUT_DIR${NC}"
+        echo -e "📋 Логи сохранены в: ${YELLOW}$LOGS_DIR${NC}"
+        echo ""
+    } >&2
 
     if [ $failed -gt 0 ]; then
-        echo -e "${YELLOW}⚠️ Диагностика проблем:${NC}"
+        echo -e "${YELLOW}⚠️ Диагностика проблем:${NC}" >&2
         if [[ "$CONVERSION_BACKEND" == "local" ]]; then
-            echo " - Проверьте логи конвертера: $(log_file_path)"
-            echo " - Убедитесь, что зависимости docling установлены"
-            echo " - Попробуйте включить LOCAL_CONVERTER_VERBOSE=true для подробностей"
+            echo " - Проверьте логи конвертера: $(log_file_path)" >&2
+            echo " - Убедитесь, что зависимости docling установлены" >&2
+            echo " - Попробуйте включить LOCAL_CONVERTER_VERBOSE=true для подробностей" >&2
         else
-            echo " - Проверьте Airflow UI: $AIRFLOW_URL/dags"
-            echo " - Убедитесь что orchestrator_dag активен"
-            echo " - Проверьте логи: $LOGS_DIR/conversion_*.log"
-            echo " - Проверьте статус всех DAG в проекте"
+            echo " - Проверьте Airflow UI: $AIRFLOW_URL/dags" >&2
+            echo " - Убедитесь что orchestrator_dag активен" >&2
+            echo " - Проверьте логи: $LOGS_DIR/conversion_*.log" >&2
+            echo " - Проверьте статус всех DAG в проекте" >&2
         fi
     else
-        echo -e "${GREEN}🎉 Все файлы успешно конвертированы!${NC}"
-        echo ""
-        echo "Следующие шаги:"
-        echo " - Файлы готовы к использованию"
-        echo " - Для перевода: ./translate-documents.sh [язык]"
+        echo -e "${GREEN}🎉 Все файлы успешно конвертированы!${NC}" >&2
+        >&2 echo ""
+        echo "Следующие шаги:" >&2
+        echo " - Файлы готовы к использованию" >&2
+        echo " - Для перевода: ./translate-documents.sh [язык]" >&2
     fi
 
     if [[ "$CONVERSION_BACKEND" == "local" && ${#success_summaries[@]} -gt 0 ]]; then
-        echo ""
-        echo "📌 Конвертированные файлы:"
+        >&2 echo ""
+        echo "📌 Конвертированные файлы:" >&2
         for summary in "${success_summaries[@]}"; do
             local md_path metadata_path raw_text_path
             md_path=$(echo "$summary" | jq -r '.output_markdown')
             metadata_path=$(echo "$summary" | jq -r '.metadata_file // empty')
             raw_text_path=$(echo "$summary" | jq -r '.raw_text_file // empty')
-            echo " - Markdown: $md_path"
+            echo " - Markdown: $md_path" >&2
             if [[ -n "$metadata_path" ]]; then
-                echo "   Метаданные: $metadata_path"
+                echo "   Метаданные: $metadata_path" >&2
             fi
             if [[ -n "$raw_text_path" ]]; then
-                echo "   Текст: $raw_text_path"
+                echo "   Текст: $raw_text_path" >&2
             fi
         done
-        echo ""
-        echo "Для повторной конвертации можно установить LOCAL_OVERWRITE_OUTPUT=true"
+        >&2 echo ""
+        echo "Для повторной конвертации можно установить LOCAL_OVERWRITE_OUTPUT=true" >&2
     fi
 }
 
@@ -556,11 +562,11 @@ main() {
     fi
 
     if [[ "$CONVERSION_BACKEND" == "local" ]]; then
-        echo -e "${YELLOW}Начинаем локальную конвертацию PDF → Markdown (OCR отключен по умолчанию)${NC}"
+        echo -e "${YELLOW}Начинаем локальную конвертацию PDF → Markdown (OCR отключен по умолчанию)${NC}" >&2
     else
-        echo -e "${YELLOW}Начинаем полную конвертацию PDF → Markdown с валидацией${NC}"
+        echo -e "${YELLOW}Начинаем полную конвертацию PDF → Markdown с валидацией${NC}" >&2
     fi
-    echo -e "${YELLOW}Нажмите Enter для начала или Ctrl+C для отмены...${NC}"
+    echo -e "${YELLOW}Нажмите Enter для начала или Ctrl+C для отмены...${NC}" >&2
     read -r
 
     process_batch
