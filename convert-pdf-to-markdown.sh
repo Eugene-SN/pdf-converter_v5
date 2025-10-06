@@ -32,10 +32,21 @@ AIRFLOW_PASSWORD="${AIRFLOW_PASSWORD:-admin}"
 # Локальные папки
 HOST_INPUT_DIR="${SCRIPT_DIR}/input"
 HOST_OUTPUT_DIR="${SCRIPT_DIR}/output/zh"
+HOST_METADATA_DIR="${SCRIPT_DIR}/output/metadata"
 LOGS_DIR="${SCRIPT_DIR}/logs"
 
+# Настройки конвертации
+CONVERSION_BACKEND="${CONVERSION_BACKEND:-local}"
+CONVERTER_ENABLE_OCR_BOOL="${CONVERTER_ENABLE_OCR_BOOL:-false}"
+LOCAL_ALLOW_OCR_FALLBACK="${LOCAL_ALLOW_OCR_FALLBACK:-false}"
+LOCAL_EXPORT_RAW_TEXT="${LOCAL_EXPORT_RAW_TEXT:-false}"
+LOCAL_OVERWRITE_OUTPUT="${LOCAL_OVERWRITE_OUTPUT:-false}"
+LOCAL_CONVERTER_VERBOSE="${LOCAL_CONVERTER_VERBOSE:-false}"
+LOCAL_OCR_LANGUAGES="${LOCAL_OCR_LANGUAGES:-eng}"
+LOCAL_CONVERTER_MODULE="document_processor.local_converter"
+
 # Создание директорий
-mkdir -p "$HOST_INPUT_DIR" "$HOST_OUTPUT_DIR" "$LOGS_DIR"
+mkdir -p "$HOST_INPUT_DIR" "$HOST_OUTPUT_DIR" "$HOST_METADATA_DIR" "$LOGS_DIR"
 
 # Настройки логирования для одного запуска
 LOG_FILE="${LOGS_DIR}/conversion_$(date +%Y%m%d_%H%M%S)_$$.log"
@@ -72,6 +83,13 @@ show_header() {
     echo " 2️⃣ Content Transformation (Преобразование в Markdown)"
     echo " 3️⃣ Quality Assurance (5-уровневая валидация)"
     echo ""
+    echo "⚙️ Режим работы: $CONVERSION_BACKEND"
+    if [[ "$CONVERSION_BACKEND" == "local" ]]; then
+        echo "   ➤ Используется локальный Docling конвертер без OCR по умолчанию"
+    else
+        echo "   ➤ Используется Airflow оркестратор"
+    fi
+    echo ""
 }
 
 check_services() {
@@ -98,6 +116,81 @@ check_services() {
     done
 
     log "INFO" "✅ Все сервисы готовы"
+}
+
+run_local_conversion() {
+    local pdf_file="$1"
+    local filename
+    filename=$(basename "$pdf_file")
+
+    log "INFO" "🚀 Локальная конвертация: $filename"
+
+    local converter_cmd=(
+        python3 -m "$LOCAL_CONVERTER_MODULE"
+        --input "$pdf_file"
+        --output-dir "$HOST_OUTPUT_DIR"
+        --metadata-dir "$HOST_METADATA_DIR"
+        --ocr-languages "$LOCAL_OCR_LANGUAGES"
+    )
+
+    if [[ "$CONVERTER_ENABLE_OCR_BOOL" == "true" ]]; then
+        converter_cmd+=(--enable-ocr)
+        if [[ "$LOCAL_ALLOW_OCR_FALLBACK" == "true" ]]; then
+            converter_cmd+=(--allow-ocr-fallback)
+        fi
+    else
+        if [[ "$LOCAL_ALLOW_OCR_FALLBACK" == "true" ]]; then
+            converter_cmd+=(--allow-ocr-fallback)
+        fi
+    fi
+
+    if [[ "$LOCAL_EXPORT_RAW_TEXT" == "true" ]]; then
+        converter_cmd+=(--export-raw-text)
+    fi
+
+    if [[ "$LOCAL_OVERWRITE_OUTPUT" == "true" ]]; then
+        converter_cmd+=(--overwrite)
+    fi
+
+    if [[ "$LOCAL_CONVERTER_VERBOSE" == "true" ]]; then
+        converter_cmd+=(--verbose)
+    fi
+
+    local converter_output
+    if ! converter_output=$("${converter_cmd[@]}"); then
+        local exit_code=$?
+        log "ERROR" "❌ Локальный конвертер завершился с ошибкой (код $exit_code)"
+        log "ERROR" "Вывод: $converter_output"
+        return $exit_code
+    fi
+
+    local status
+    status=$(echo "$converter_output" | jq -r '.status // empty' 2>/dev/null || echo "")
+    if [[ "$status" != "success" ]]; then
+        log "ERROR" "❌ Локальный конвертер вернул ошибку: $converter_output"
+        return 1
+    fi
+
+    local markdown_path
+    markdown_path=$(echo "$converter_output" | jq -r '.output_markdown // empty')
+    local metadata_path
+    metadata_path=$(echo "$converter_output" | jq -r '.metadata_file // empty')
+    local raw_text_path
+    raw_text_path=$(echo "$converter_output" | jq -r '.raw_text_file // empty')
+    local pages sections
+    pages=$(echo "$converter_output" | jq -r '.pages // "0"')
+    sections=$(echo "$converter_output" | jq -r '.sections // "0"')
+
+    log "INFO" "📄 Markdown: ${markdown_path:-не указан}"
+    if [[ -n "$metadata_path" ]]; then
+        log "INFO" "🧾 Метаданные: $metadata_path"
+    fi
+    if [[ -n "$raw_text_path" ]]; then
+        log "INFO" "📝 Текст: $raw_text_path"
+    fi
+    log "INFO" "📊 Страниц: $pages, секций: $sections"
+
+    printf '%s\n' "$converter_output"
 }
 
 # ИСПРАВЛЕНО: Правильное формирование JSON через jq
@@ -328,18 +421,31 @@ process_batch() {
     local failed=0
     local start_time
     start_time=$(date +%s)
+    local success_summaries=()
 
     for pdf_file in "${pdf_files[@]}"; do
         local filename
         filename=$(basename "$pdf_file")
         echo -e "${BLUE}[ФАЙЛ $((processed + failed + 1))/$total_files]${NC} $filename"
 
-        if trigger_full_conversion "$pdf_file"; then
-            ((processed++))
-            echo -e "Статус: ${GREEN}✅ УСПЕШНО КОНВЕРТИРОВАН${NC}"
+        if [[ "$CONVERSION_BACKEND" == "local" ]]; then
+            local conversion_json
+            if conversion_json=$(run_local_conversion "$pdf_file"); then
+                ((processed++))
+                success_summaries+=("$conversion_json")
+                echo -e "Статус: ${GREEN}✅ УСПЕШНО КОНВЕРТИРОВАН${NC}"
+            else
+                ((failed++))
+                echo -e "Статус: ${RED}❌ ОШИБКА КОНВЕРТАЦИИ${NC}"
+            fi
         else
-            ((failed++))
-            echo -e "Статус: ${RED}❌ ОШИБКА КОНВЕРТАЦИИ${NC}"
+            if trigger_full_conversion "$pdf_file"; then
+                ((processed++))
+                echo -e "Статус: ${GREEN}✅ УСПЕШНО КОНВЕРТИРОВАН${NC}"
+            else
+                ((failed++))
+                echo -e "Статус: ${RED}❌ ОШИБКА КОНВЕРТАЦИИ${NC}"
+            fi
         fi
         echo ""
     done
@@ -363,16 +469,42 @@ process_batch() {
 
     if [ $failed -gt 0 ]; then
         echo -e "${YELLOW}⚠️ Диагностика проблем:${NC}"
-        echo " - Проверьте Airflow UI: $AIRFLOW_URL/dags"
-        echo " - Убедитесь что orchestrator_dag активен"
-        echo " - Проверьте логи: $LOGS_DIR/conversion_*.log"
-        echo " - Проверьте статус всех DAG в проекте"
+        if [[ "$CONVERSION_BACKEND" == "local" ]]; then
+            echo " - Проверьте логи конвертера: $(log_file_path)"
+            echo " - Убедитесь, что зависимости docling установлены"
+            echo " - Попробуйте включить LOCAL_CONVERTER_VERBOSE=true для подробностей"
+        else
+            echo " - Проверьте Airflow UI: $AIRFLOW_URL/dags"
+            echo " - Убедитесь что orchestrator_dag активен"
+            echo " - Проверьте логи: $LOGS_DIR/conversion_*.log"
+            echo " - Проверьте статус всех DAG в проекте"
+        fi
     else
         echo -e "${GREEN}🎉 Все файлы успешно конвертированы!${NC}"
         echo ""
         echo "Следующие шаги:"
         echo " - Файлы готовы к использованию"
         echo " - Для перевода: ./translate-documents.sh [язык]"
+    fi
+
+    if [[ "$CONVERSION_BACKEND" == "local" && ${#success_summaries[@]} -gt 0 ]]; then
+        echo ""
+        echo "📌 Конвертированные файлы:"
+        for summary in "${success_summaries[@]}"; do
+            local md_path metadata_path raw_text_path
+            md_path=$(echo "$summary" | jq -r '.output_markdown')
+            metadata_path=$(echo "$summary" | jq -r '.metadata_file // empty')
+            raw_text_path=$(echo "$summary" | jq -r '.raw_text_file // empty')
+            echo " - Markdown: $md_path"
+            if [[ -n "$metadata_path" ]]; then
+                echo "   Метаданные: $metadata_path"
+            fi
+            if [[ -n "$raw_text_path" ]]; then
+                echo "   Текст: $raw_text_path"
+            fi
+        done
+        echo ""
+        echo "Для повторной конвертации можно установить LOCAL_OVERWRITE_OUTPUT=true"
     fi
 }
 
@@ -387,12 +519,29 @@ check_dependencies() {
     fi
     log "INFO" "✅ jq установлен"
 
-    # Проверка curl
-    if ! command -v curl &> /dev/null; then
-        log "ERROR" "❌ curl не установлен. Установите: sudo apt-get install curl"
-        exit 1
+    if [[ "$CONVERSION_BACKEND" == "local" ]]; then
+        if ! command -v python3 &> /dev/null; then
+            log "ERROR" "❌ Python 3 не найден. Установите python3"
+            exit 1
+        fi
+        if ! python3 - >/dev/null 2>&1 <<'PY'; then
+import importlib.util
+required = ["docling", "docling_core"]
+missing = [name for name in required if importlib.util.find_spec(name) is None]
+if missing:
+    raise SystemExit(1)
+PY
+            log "ERROR" "❌ Отсутствуют зависимости docling/docling_core. Установите их перед запуском"
+            exit 1
+        fi
+        log "INFO" "✅ Python окружение готово"
+    else
+        if ! command -v curl &> /dev/null; then
+            log "ERROR" "❌ curl не установлен. Установите: sudo apt-get install curl"
+            exit 1
+        fi
+        log "INFO" "✅ curl установлен"
     fi
-    log "INFO" "✅ curl установлен"
 }
 
 # Основная логика
@@ -400,9 +549,17 @@ main() {
     show_header
     log "INFO" "Запись лога: $(log_file_path)"
     check_dependencies
-    check_services
+    if [[ "$CONVERSION_BACKEND" == "local" ]]; then
+        log "INFO" "Проверка сервисов не требуется для локального режима"
+    else
+        check_services
+    fi
 
-    echo -e "${YELLOW}Начинаем полную конвертацию PDF → Markdown с валидацией${NC}"
+    if [[ "$CONVERSION_BACKEND" == "local" ]]; then
+        echo -e "${YELLOW}Начинаем локальную конвертацию PDF → Markdown (OCR отключен по умолчанию)${NC}"
+    else
+        echo -e "${YELLOW}Начинаем полную конвертацию PDF → Markdown с валидацией${NC}"
+    fi
     echo -e "${YELLOW}Нажмите Enter для начала или Ctrl+C для отмены...${NC}"
     read -r
 
