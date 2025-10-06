@@ -1,180 +1,249 @@
-# apply_patch_win.ps1
-# Применяет патч из буфера (Codex heredoc или чистый unified diff), авто-чинит типовые кривизны и пушит в origin/main.
+# apply_codex_patch.ps1
+# Специализированный скрипт для применения Codex патчей в VS Code на Windows
+# Версия: 2.0 (исправленная)
 
+param(
+    [switch]$DryRun = $false,
+    [switch]$AutoCommit = $false,
+    [switch]$Verbose = $false
+)
+
+# Настройка PowerShell для корректной работы с Git и Unicode
 $ErrorActionPreference = "Stop"
-function Die($msg) { throw $msg }
-
-# Git
-$git = (Get-Command git -ErrorAction Stop).Source
-
-# Кодировки/вывод
-try { chcp 65001 | Out-Null } catch {}
+$OutputEncoding = [System.Text.UTF8Encoding]::new()
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
-[Console]::InputEncoding  = [System.Text.UTF8Encoding]::new()
-$OutputEncoding           = [System.Text.UTF8Encoding]::new()
 
-# --- helpers ---
-function Save-Utf8NoBom([string]$Path, [string]$Text) {
-  [System.IO.File]::WriteAllText($Path, $Text, [System.Text.UTF8Encoding]::new($false))
-}
-function Read-ClipboardRaw {
-  $raw = Get-Clipboard -Raw
-  if ([string]::IsNullOrWhiteSpace($raw)) { Die "[ERR] Clipboard is empty." }
-  $raw = $raw -replace "`r`n","`n" -replace "`r","`n"
-  $raw = $raw -replace "[\uFEFF\u200B\u200E\u200F\u00A0]",""
-  $raw.Trim()
-}
-function Extract-HeredocBody([string]$text) {
-  $lines = $text -split "`n"
-  $start = $null; $end = $null
-  for ($i=0; $i -lt $lines.Count; $i++) {
-    if ($lines[$i] -match "^[\s\S]*<<\s*(['""]?)EOF\1\s*$") { $start = $i + 1; break }
-  }
-  if ($start -ne $null) {
-    for ($j=$start; $j -lt $lines.Count; $j++) {
-      if ($lines[$j] -match "^\s*EOF\s*$") { $end = $j; break }
-    }
-  }
-  if ($start -ne $null -and $end -ne $null -and $end -gt $start) {
-    return (($lines[$start..($end-1)] -join "`n").Trim())
-  }
-  return $null
-}
-function Extract-FromFirstDiff([string]$text) {
-  $m = [regex]::Match($text, "(?m)^\s*diff --git\s")
-  if ($m.Success) { return $text.Substring($m.Index).Trim() }
-  return $null
-}
-function Score-Patch([string]$body) {
-  if ([string]::IsNullOrWhiteSpace($body)) { return 0 }
-  $diffs = ([regex]::Matches($body, "(?m)^\s*diff --git\s")).Count
-  $hunks = ([regex]::Matches($body, "(?m)^\s*@@ ")).Count
-  return ($diffs*1000 + $hunks)
-}
-function Sanitize-Patch([string]$body) {
-  $lines = $body -split "`n"
+# Цвета для вывода
+function Write-Success($msg) { Write-Host "✓ $msg" -ForegroundColor Green }
+function Write-Info($msg) { Write-Host "ℹ $msg" -ForegroundColor Cyan }
+function Write-Warn($msg) { Write-Host "⚠ $msg" -ForegroundColor Yellow }
+function Write-Fail($msg) { Write-Host "✗ $msg" -ForegroundColor Red; exit 1 }
 
-  # 1) Исправить a//dev/null → a/dev/null и --- a//dev/null → --- /dev/null
-  for ($i=0; $i -lt $lines.Count; $i++) {
-    $ln = $lines[$i]
-    if ($ln -match "^(diff --git)\s+a//dev/null\s+b/") {
-      $lines[$i] = $ln -replace "a//dev/null","a/dev/null"
-    }
-    if ($ln -match "^\-\-\-\s+a//dev/null\s*$") {
-      $lines[$i] = "--- /dev/null"
-    }
-    if ($ln -match "^\-\-\-\s+a/dev/null\s*$") {
-      $lines[$i] = "--- /dev/null"
-    }
-  }
+Write-Info "Codex Patch Applier v2.0 для VS Code Windows"
+Write-Info "=============================================="
 
-  # 2) Для новых файлов — если нет new file mode 100644, вставим после заголовка diff
-  for ($i=0; $i -lt $lines.Count; $i++) {
-    if ($lines[$i] -match "^(diff --git)\s+a/(?:dev/null|[^ ]+)\s+b/([^ ]+)\s*$") {
-      $j = $i + 1
-      $hasNewFileMode = $false; $hasIndex = $false
-      while ($j -lt $lines.Count -and $lines[$j] -notmatch "^\s*diff --git\s") {
-        if ($lines[$j] -match "^new file mode\s+\d+") { $hasNewFileMode = $true }
-        if ($lines[$j] -match "^index\s+[0-9a-f]{7,}\.\.[0-9a-f]{7,}(\s+\d+)?$") { $hasIndex = $true }
-        if ($lines[$j] -match "^\@\@ ") { break }
-        $j++
-      }
-      if (-not $hasNewFileMode) {
-        $lines = $lines[0..$i] + @("new file mode 100644") + $lines[($i+1)..($lines.Count-1)]
-      }
-      # 3) Убедимся, что index ... заканчивается на режим (100644)
-      #    (у новых файлов часто нет, git apply иногда ругается)
-      for ($k=$i+1; $k -lt [Math]::Min($lines.Count, $i+8); $k++) {
-        if ($lines[$k] -match "^index\s+([0-9a-f]{7,})\.\.([0-9a-f]{7,})(\s+\d+)?$") {
-          if (-not $lines[$k].Contains(" 100644")) {
-            $lines[$k] = $lines[$k] + " 100644"
-          }
-          break
+# 1. Проверки окружения
+try {
+    $gitPath = (Get-Command git -ErrorAction Stop).Source
+    Write-Success "Git найден: $gitPath"
+} catch {
+    Write-Fail "Git не установлен или не найден в PATH"
+}
+
+# Проверка что мы в Git репозитории
+$gitStatus = & git rev-parse --is-inside-work-tree 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Fail "Текущая директория не является Git репозиторием"
+}
+
+# Получение информации о репозитории
+$currentBranch = & git rev-parse --abbrev-ref HEAD
+$repoStatus = & git status --porcelain 2>$null
+$isDirty = $repoStatus.Count -gt 0
+
+Write-Info "Ветка: $currentBranch"
+Write-Info "Статус: $(if($isDirty) {'Есть изменения'} else {'Чистый'})"
+
+if ($isDirty -and $Verbose) {
+    Write-Warn "Незакоммиченные файлы:"
+    $repoStatus | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+}
+
+# 2. Получение патча из буфера обмена
+Write-Info "Чтение буфера обмена..."
+try {
+    $clipboardRaw = Get-Clipboard -Raw
+    if ([string]::IsNullOrEmpty($clipboardRaw)) {
+        Write-Fail "Буфер обмена пуст"
+    }
+    Write-Success "Получено $($clipboardRaw.Length) символов из буфера"
+} catch {
+    Write-Fail "Ошибка чтения буфера обмена: $($_.Exception.Message)"
+}
+
+# 3. Предобработка патча
+Write-Info "Обработка содержимого патча..."
+
+# Нормализация переносов строк
+$patchContent = $clipboardRaw -replace "`r`n", "`n" -replace "`r", "`n"
+
+# Удаление невидимых символов Unicode
+$patchContent = $patchContent -replace "[\u200B\u200C\u200D\uFEFF\u00A0]", ""
+
+# Обработка Codex heredoc формата (cat << 'EOF')
+if ($patchContent -match "(?s)cat\s*<<\s*['"]?EOF['"]?\s*\n(.*)\nEOF") {
+    $patchContent = $matches[1]
+    Write-Success "Извлечён патч из heredoc формата"
+}
+
+# Удаление markdown code blocks
+if ($patchContent -match "(?s)^\s*```(?:diff|patch|git)?\s*\n(.*)\n```\s*$") {
+    $patchContent = $matches[1]
+    Write-Success "Удалены markdown code fences"
+}
+
+# Поиск начала Git патча
+if ($patchContent -match "(?m)(^diff --git.*)") {
+    $patchContent = $matches[1]
+    Write-Success "Найден Git diff патч"
+} else {
+    # Сохраняем содержимое для диагностики
+    $debugFile = "clipboard_debug_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    Set-Content -Path $debugFile -Value $clipboardRaw -Encoding UTF8
+    Write-Fail "В буфере не найден валидный Git патч. Содержимое сохранено в $debugFile"
+}
+
+$patchContent = $patchContent.Trim()
+
+# 4. Валидация патча
+Write-Info "Валидация структуры патча..."
+$diffCount = ([regex]::Matches($patchContent, "(?m)^diff --git")).Count
+$hunkCount = ([regex]::Matches($patchContent, "(?m)^@@")).Count
+
+Write-Info "Найдено: $diffCount файлов, $hunkCount hunks"
+
+if ($diffCount -eq 0) {
+    Write-Fail "Патч не содержит изменений файлов (diff --git)"
+}
+
+# 5. Предпросмотр патча
+Write-Info "Предпросмотр патча:"
+Write-Host "$(([char]0x2500) * 50)" -ForegroundColor Gray
+
+$previewLines = $patchContent -split "`n" | Select-Object -First 15
+$previewLines | ForEach-Object {
+    $line = $_
+    $color = "White"
+    if ($line -match "^diff --git") { $color = "Magenta" }
+    elseif ($line -match "^@@") { $color = "Blue" }
+    elseif ($line -match "^\+") { $color = "Green" }
+    elseif ($line -match "^-") { $color = "Red" }
+    elseif ($line -match "^index") { $color = "Gray" }
+
+    Write-Host $line -ForegroundColor $color
+}
+
+$totalLines = ($patchContent -split "`n").Count
+if ($totalLines -gt 15) {
+    Write-Host "... ещё $($totalLines - 15) строк" -ForegroundColor Gray
+}
+Write-Host "$(([char]0x2500) * 50)" -ForegroundColor Gray
+
+# 6. Создание временного файла патча
+$tempPatchFile = [System.IO.Path]::GetTempFileName() + ".patch"
+[System.IO.File]::WriteAllText($tempPatchFile, $patchContent, [System.Text.UTF8Encoding]::new($false))
+Write-Success "Патч сохранён: $tempPatchFile"
+
+try {
+    # 7. Проверка применимости
+    Write-Info "Проверка применимости патча..."
+
+    $checkOutput = & git apply --check --verbose $tempPatchFile 2>&1
+    $checkSuccess = $LASTEXITCODE -eq 0
+
+    if (-not $checkSuccess) {
+        Write-Warn "Прямое применение невозможно, попробуем 3-way merge..."
+        $check3way = & git apply --check --3way $tempPatchFile 2>&1  
+        $check3waySuccess = $LASTEXITCODE -eq 0
+
+        if (-not $check3waySuccess) {
+            Write-Warn "Детали проблемы:"
+            $checkOutput | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
+
+            # В VS Code можно попробовать --reject для создания .rej файлов
+            $response = Read-Host "Попробовать принудительное применение с созданием .rej файлов? [y/N]"
+            if ($response -notmatch "^[yYдД]") {
+                Write-Fail "Применение отменено пользователем"
+            }
+            $forceMode = $true
+        } else {
+            Write-Success "3-way merge возможен"
+            $use3way = $true
         }
-      }
+    } else {
+        Write-Success "Патч может быть применён напрямую"
     }
-  }
 
-  # 4) Гарантируем завершающую пустую строку
-  $text = ($lines -join "`n").TrimEnd() + "`n"
-  return $text
+    # 8. Режим dry-run
+    if ($DryRun) {
+        Write-Success "Режим dry-run: патч выглядит применимым"
+        Remove-Item $tempPatchFile -Force
+        exit 0
+    }
+
+    # 9. Финальное подтверждение
+    if (-not $AutoCommit) {
+        Write-Host ""
+        Write-Host "Готов применить патч к репозиторию:" -ForegroundColor Yellow
+        Write-Host "  Ветка: $currentBranch" -ForegroundColor Yellow
+        Write-Host "  Файлов: $diffCount" -ForegroundColor Yellow
+        Write-Host "  Hunks: $hunkCount" -ForegroundColor Yellow
+        Write-Host ""
+
+        $confirm = Read-Host "Применить патч? [y/N]"
+        if ($confirm -notmatch "^[yYдД]") {
+            Write-Info "Применение отменено"
+            Remove-Item $tempPatchFile -Force
+            exit 0
+        }
+    }
+
+    # 10. Применение патча
+    Write-Info "Применение патча..."
+
+    if ($checkSuccess) {
+        & git apply $tempPatchFile
+    } elseif ($use3way) {
+        & git apply --3way $tempPatchFile
+    } elseif ($forceMode) {
+        & git apply --reject --whitespace=fix $tempPatchFile
+    }
+
+    $applySuccess = $LASTEXITCODE -eq 0
+
+    if ($applySuccess) {
+        Write-Success "Патч применён успешно!"
+    } else {
+        Write-Warn "Патч применён с предупреждениями"
+    }
+
+    # 11. Показать результат
+    Write-Info "Изменения в рабочей директории:"
+    & git status --short | ForEach-Object {
+        $status = $_.Substring(0,2)
+        $file = $_.Substring(3)
+        $color = switch ($status.Trim()) {
+            "M" { "Yellow" }
+            "A" { "Green" }  
+            "D" { "Red" }
+            "??" { "Gray" }
+            default { "White" }
+        }
+        Write-Host "  $status $file" -ForegroundColor $color
+    }
+
+    # 12. Автокоммит (если включён)
+    if ($AutoCommit) {
+        Write-Info "Автоматический коммит изменений..."
+        & git add -A
+
+        $commitMsg = "Apply Codex patch: $diffCount files, $hunkCount hunks"
+        & git commit -m $commitMsg
+
+        if ($LASTEXITCODE -eq 0) {
+            Write-Success "Изменения закоммичены: $commitMsg"
+        } else {
+            Write-Warn "Коммит не выполнен (возможно нет изменений)"
+        }
+    } else {
+        Write-Info "Используйте 'git add' и 'git commit' для сохранения изменений"
+    }
+
+} finally {
+    # Очистка временных файлов
+    if (Test-Path $tempPatchFile) {
+        Remove-Item $tempPatchFile -Force
+    }
 }
-function Try-GitApply([string]$patchPath, [switch]$Use3way, [switch]$Reject) {
-  if ($Use3way) {
-    & $git apply --check --3way "$patchPath" 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) { & $git apply --3way "$patchPath"; return $LASTEXITCODE }
-  } elseif ($Reject) {
-    & $git apply --reject --whitespace=fix "$patchPath"; return $LASTEXITCODE
-  } else {
-    & $git apply --check --whitespace=fix "$patchPath" 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) { & $git apply --whitespace=fix "$patchPath"; return $LASTEXITCODE }
-  }
-  return 1
-}
 
-# --- проверка репозитория ---
-& $git rev-parse --is-inside-work-tree | Out-Null
-if ($LASTEXITCODE -ne 0) { Die "Not a git repository." }
-
-# --- читаем буфер и выделяем тело unified diff ---
-$raw = Read-ClipboardRaw
-
-$body1 = Extract-HeredocBody $raw
-$body2 = Extract-FromFirstDiff $raw
-$body3 = $null
-if ($body1) { $body3 = Extract-FromFirstDiff $body1 }
-$candidates = @($body1, $body2, $body3) | Where-Object { $_ -ne $null }
-if ($candidates.Count -eq 0) {
-  Save-Utf8NoBom "PATCH.clipboard.txt" $raw
-  Save-Utf8NoBom "PATCH.preview.txt" (($raw -split "`n" | Select-Object -First 120) -join "`n")
-  Die "[ERR] No 'diff --git' candidates found. Saved PATCH.clipboard.txt / PATCH.preview.txt."
-}
-$best = $candidates | Sort-Object { - (Score-Patch $_) } | Select-Object -First 1
-
-# сдвиг к первому From/diff
-$fromM = [regex]::Match($best, "(?m)^\s*From [0-9a-f]{40}\b")
-$diffM = [regex]::Match($best, "(?m)^\s*diff --git\s")
-if ($fromM.Success) { $best = $best.Substring($fromM.Index) }
-elseif ($diffM.Success) { $best = $best.Substring($diffM.Index) }
-$best = $best.Trim()
-
-# сохраняем «как есть»
-$tmp = Join-Path $env:TEMP ("codex_patch_{0}.patch" -f ([guid]::NewGuid().ToString("N")))
-Save-Utf8NoBom $tmp $best
-Write-Host "[i] Patch saved to $tmp"
-
-# быстрая структурная проверка
-if (([regex]::Matches($best, "(?m)^\s*diff --git\s")).Count -eq 0) {
-  Save-Utf8NoBom "PATCH.preview.txt" (($best -split "`n" | Select-Object -First 120) -join "`n")
-  Die "[ERR] No 'diff --git' headers found after extraction. Preview saved to PATCH.preview.txt."
-}
-if (([regex]::Matches($best, "(?m)^\s*@@ ")).Count -eq 0) {
-  Save-Utf8NoBom "PATCH.preview.txt" (($best -split "`n" | Select-Object -First 120) -join "`n")
-  Die "[ERR] No hunks ('@@ ... @@') found. Preview saved to PATCH.preview.txt."
-}
-
-# --- попытка применить «сырой» патч ---
-if (Try-GitApply -patchPath $tmp -Use3way) { goto CommitAndPush }
-if (Try-GitApply -patchPath $tmp)        { goto CommitAndPush }
-
-# --- санитарная обработка и повтор ---
-$san = Sanitize-Patch $best
-$sanPath = [System.IO.Path]::ChangeExtension($tmp, ".sanitized.patch")
-Save-Utf8NoBom $sanPath $san
-Write-Host "[i] Sanitized patch → $sanPath"
-
-if (Try-GitApply -patchPath $sanPath -Use3way) { goto CommitAndPush }
-if (Try-GitApply -patchPath $sanPath)          { goto CommitAndPush }
-if (Try-GitApply -patchPath $sanPath -Reject)  { goto CommitAndPush }
-
-Save-Utf8NoBom "PATCH.preview.txt" ((Get-Content -LiteralPath $sanPath -TotalCount 200) -join "`n")
-Die "[ERR] git apply failed even after sanitizing. Preview saved to PATCH.preview.txt."
-
-:CommitAndPush
-& $git add -A
-& $git commit -m "Apply patch from Codex" | Out-Null
-if ($LASTEXITCODE -ne 0) { Write-Host "[i] Nothing to commit (possibly already applied)." }
-
-& $git pull --rebase --autostash origin main | Out-Null
-& $git push origin HEAD:main
-Write-Host "[DONE] Synced with GitHub."
+Write-Success "Операция завершена!"
