@@ -144,15 +144,47 @@ class DoclingProcessor:
 
         logger.info("DoclingProcessor initialized with conditional OCR loading")
 
-    def _resolve_image_bytes(self, payload: Any) -> Optional[bytes]:
+    def _resolve_image_bytes(self, payload: Any, _visited: Optional[set] = None) -> Optional[bytes]:
         """Attempt to extract raw bytes from a payload returned by Docling images."""
 
         if payload is None:
             return None
 
+        if _visited is None:
+            _visited = set()
+
+        obj_id = id(payload)
+        if obj_id in _visited:
+            return None
+        _visited.add(obj_id)
+
         try:
             if isinstance(payload, (bytes, bytearray, memoryview)):
                 return bytes(payload)
+
+            if isinstance(payload, Path):
+                try:
+                    return payload.read_bytes()
+                except Exception:
+                    logger.debug("Failed to read bytes from path payload %s", payload, exc_info=True)
+
+            if isinstance(payload, str):
+                possible_path = Path(payload)
+                if possible_path.exists():
+                    try:
+                        return possible_path.read_bytes()
+                    except Exception:
+                        logger.debug("Failed to read bytes from string path payload %s", payload, exc_info=True)
+
+            if isinstance(payload, dict):
+                if "data" in payload:
+                    resolved = self._resolve_image_bytes(payload["data"], _visited=_visited)
+                    if resolved:
+                        return resolved
+                if "bytes" in payload:
+                    resolved = self._resolve_image_bytes(payload["bytes"], _visited=_visited)
+                    if resolved:
+                        return resolved
 
             # io.BytesIO and similar expose getbuffer / getvalue / read methods
             if hasattr(payload, "getbuffer"):
@@ -160,27 +192,26 @@ class DoclingProcessor:
                     buffer = payload.getbuffer()
                     return bytes(buffer)
                 except Exception:
-                    pass
+                    logger.debug("getbuffer() failed on payload", exc_info=True)
 
             if hasattr(payload, "to_bytes") and callable(payload.to_bytes):
                 try:
                     return payload.to_bytes()
                 except Exception:
-                    pass
+                    logger.debug("to_bytes() failed on payload", exc_info=True)
 
             if hasattr(payload, "tobytes") and callable(payload.tobytes):
                 try:
                     return payload.tobytes()
                 except Exception:
-                    pass
+                    logger.debug("tobytes() failed on payload", exc_info=True)
 
             if hasattr(payload, "getvalue") and callable(payload.getvalue):
                 try:
                     value = payload.getvalue()
-                    if isinstance(value, (bytes, bytearray, memoryview)):
-                        return bytes(value)
+                    return self._resolve_image_bytes(value, _visited=_visited)
                 except Exception:
-                    pass
+                    logger.debug("getvalue() failed on payload", exc_info=True)
 
             if hasattr(payload, "read") and callable(payload.read):
                 try:
@@ -208,10 +239,25 @@ class DoclingProcessor:
                     if isinstance(data, str):
                         data = data.encode()
 
-                    if isinstance(data, (bytes, bytearray, memoryview)):
-                        return bytes(data)
+                    return self._resolve_image_bytes(data, _visited=_visited)
                 except Exception:
-                    pass
+                    logger.debug("Failed to read() from payload", exc_info=True)
+
+            for attr_name in ("data", "buffer", "content", "value", "payload", "bytes"):
+                if hasattr(payload, attr_name):
+                    try:
+                        attr_value = getattr(payload, attr_name)
+                        if callable(attr_value):
+                            try:
+                                attr_value = attr_value()
+                            except Exception:
+                                logger.debug("Callable attribute %s failed on payload", attr_name, exc_info=True)
+                                continue
+                        resolved = self._resolve_image_bytes(attr_value, _visited=_visited)
+                        if resolved:
+                            return resolved
+                    except Exception:
+                        logger.debug("Failed to resolve attribute %s on payload", attr_name, exc_info=True)
 
         except Exception:
             logger.debug("Failed to resolve image payload into bytes", exc_info=True)
@@ -590,7 +636,7 @@ class DoclingProcessor:
                         try:
                             with open(image_file, "wb") as f:
                                 f.write(image_bytes)
-                            image_data["file_path"] = str(image_file)
+                            image_data["file_path"] = str(image_file.resolve())
                             image_data["size_bytes"] = len(image_bytes)
                             saved = True
                             break
