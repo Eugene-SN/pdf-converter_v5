@@ -1,4 +1,8 @@
 # apply_patch_win.ps1
+# Apply patch from clipboard, commit and push to origin/main (Windows).
+# Handles Codex "Copy as git apply" heredoc wrappers, single-line copies, and lost spaces.
+# Supports git-format-patch (git am) and unified diff (git apply).
+
 $ErrorActionPreference = "Stop"
 
 # Resolve exact git executable
@@ -18,24 +22,31 @@ Run-Git @('rev-parse','--is-inside-work-tree') -Quiet
 $raw = Get-Clipboard
 if ([string]::IsNullOrWhiteSpace($raw)) { throw "[ERR] Clipboard is empty." }
 
-# 2) Normalize newlines + strip invisible chars
+# 2) Normalize newlines + strip common invisibles
 $raw = $raw -replace "`r`n","`n" -replace "`r","`n"
 $raw = $raw -replace "[\uFEFF\u200B\u200E\u200F\u00A0]",""
 $raw = $raw.Trim()
 
-# 3) Strip Markdown fences
+# 3) Strip Markdown code fences if present
 $raw = $raw -replace "(?s)^\s*```[a-zA-Z0-9_-]*\s*", ""
 $raw = $raw -replace "(?s)\s*```\s*$", ""
 $raw = $raw.Trim()
 
-# 4) Also strip invisible chars at start of EACH line (не трогаем обычные пробелы)
+# 4) Strip invisibles at START OF EACH LINE (не трогаем обычные пробелы)
 $raw = [regex]::Replace($raw, "(?m)^[\uFEFF\u200B\u200E\u200F\u00A0]+", "")
 
-# 5) If looks single-line -> heuristic reflow
+# 5) Handle Codex 'Copy as git apply' heredoc wrapper: keep body between <<'EOF' and EOF
+if ($raw -match "(?s)<<'EOF'(.*)EOF") {
+  $raw = ($Matches[1] -replace "^\s+","").Trim()
+}
+
+# 6) If looks single-line or few lines -> heuristic reflow + **space fixes**
 if ( ($raw -split "`n").Length -le 2 ) {
   Write-Host "[i] Heuristic reflow: input looks like a single line, trying to insert newlines…"
+  # collapse multiple whitespace to single spaces first
   $s = " " + ($raw -replace "\s+"," ").Trim()
 
+  # insert line breaks before typical diff tokens (order matters)
   $tokens = @(
     ' diff --git ',
     ' new file mode ',
@@ -46,33 +57,42 @@ if ( ($raw -split "`n").Length -le 2 ) {
     ' @@ '
   )
   foreach ($t in $tokens) {
-    $s = $s -replace [regex]::Escape($t), ("`n" + $t.Trim())
+    $s = $s -replace [regex]::Escape($t), ("`n" + $t.Trim() + " ")
   }
 
-  # добавим переводы строк перед строками с добавлениями контента, если они слиплись
-  $s = $s -replace "(?<!`n)\+([^\+\-@ ].*)", "`n+$1"
+  # Mandatory space fixes that often get lost
+  # diff --gita/... -> diff --git a/...
+  $s = $s -replace "(?m)^diff --git(?=a/|b/)", "diff --git "
+  # index<sha>.. -> index <sha>..
+  $s = $s -replace "(?m)^index([0-9a-f]{7,40}\.\.[0-9a-f]{7,40})", "index `$1"
+  # ---a/... -> --- a/...
+  $s = $s -replace "(?m)^---(?=a/|/dev/null)", "--- "
+  # +++b/... -> +++ b/...
+  $s = $s -replace "(?m)^\+\+\+(?=b/|/dev/null)", "+++ "
 
-  # cleanup
+  # ensure each added/removed/context line starts on its own line after hunks
+  $s = $s -replace "(?<!`n)\+([^\+\-@ ].*)", "`n+$1"
+  $s = $s -replace "(?<!`n)\-([^\+\-@ ].*)", "`n-$1"
+
+  # cleanup excessive newlines
   $s = $s -replace "`n{2,}","`n"
   $raw = $s.Trim()
 }
 
-# 6) Keep from first 'From <sha>' or 'diff --git'
+# 7) Keep from first 'From <sha>' or 'diff --git'
 $from = [regex]::Match($raw, "(?m)^\s*From [0-9a-f]{40}\b")
 $diff = [regex]::Match($raw, "(?m)^\s*diff --git\s+a/([^\s]+)\s+b/([^\s]+)")
 if     ($from.Success) { $raw = $raw.Substring($from.Index) }
 elseif ($diff.Success) { $raw = $raw.Substring($diff.Index) }
 
-# 6b) Ensure we have both --- and +++ headers for each file block
-# простая коррекция первой секции: если есть '--- /dev/null' и нет последующего '+++ b/…', добавим из diff-заголовка
+# 7b) Ensure we have both --- and +++ headers for the first file if broken
 if ($diff.Success) {
   $bPath = $diff.Groups[2].Value
-  # если первая встречная линия --- /dev/null, а следующей +++ нет — вставим
   $lines = $raw -split "`n"
-  for ($i=0; $i -lt [Math]::Min($lines.Length, 20); $i++) {
-    if ($lines[$i] -match "^\s*---\s+/dev/null\s*$") {
+  for ($i=0; $i -lt [Math]::Min($lines.Length, 25); $i++) {
+    if ($lines[$i] -match "^\s*---\s+(/dev/null|a/.*)\s*$") {
       $hasPlus = $false
-      for ($j=$i+1; $j -lt [Math]::Min($lines.Length, $i+5); $j++) {
+      for ($j=$i+1; $j -lt [Math]::Min($lines.Length, $i+6); $j++) {
         if ($lines[$j] -match "^\s*\+\+\+\s+b/") { $hasPlus = $true; break }
         if ($lines[$j] -match "^\s*@@ ") { break }
       }
@@ -86,29 +106,29 @@ if ($diff.Success) {
   }
 }
 
-# 7) Require at least one hunk '@@'
+# 8) Must have at least one hunk '@@'
 if ($raw -notmatch "(?m)^\s*@@") {
   $preview = (($raw -split "`n") | Select-Object -First 30) -join "`n"
   throw "[ERR] No hunks found (^\s*@@). The clipboard likely contains headers only or was mangled by formatting.`n--- Preview ---`n$preview"
 }
 
-# 8) Save temp (UTF-8 no BOM)
+# 9) Save to temp (UTF-8 no BOM)
 $tmp = Join-Path $env:TEMP ("codex_patch_{0}.patch" -f ([guid]::NewGuid().ToString("N")))
 [IO.File]::WriteAllText($tmp,$raw,[Text.UTF8Encoding]::new($false))
 Write-Host "[i] Patch saved to $tmp"
 
-# 9) Diagnostics
+# 10) Diagnostics
 $lines = $raw -split "`n"
 $first4 = ($lines | Select-Object -First 4) -join "`n"
 $firstHunk = ($lines | Where-Object { $_ -match "^\s*@@" } | Select-Object -First 1)
 Write-Host "[i] First lines:`n$first4"
 if ($firstHunk) { Write-Host "[i] First hunk line: $firstHunk" }
 
-# 10) Detect format
+# 11) Detect format
 $gitFormat = ($raw -match "(?m)^\s*From [0-9a-f]{40}\b" -and $raw -match "(?m)^\s*Subject:")
 $unified   = ($raw -match "(?m)^\s*diff --git\s")
 
-# 11) Apply
+# 12) Apply
 try {
   if ($gitFormat) {
     Write-Host "[i] Trying: git am -3"
@@ -144,7 +164,7 @@ catch {
   Write-Host "[OK] Applied via git apply --reject (check *.rej if any)"
 }
 
-# 12) Sync
+# 13) Sync
 & $gitExe pull --rebase --autostash origin main | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "[GIT] pull --rebase failed." }
 Run-Git @('push','origin','HEAD:main')
