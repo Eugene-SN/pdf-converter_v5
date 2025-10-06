@@ -1,173 +1,102 @@
 # apply_patch_win.ps1
 # Apply patch from clipboard, commit and push to origin/main (Windows).
-# Handles Codex "Copy as git apply" heredoc wrappers, single-line copies, and lost spaces.
-# Supports git-format-patch (git am) and unified diff (git apply).
+# Без «рефлоу»: берём либо чистый unified diff, либо тело heredoc из "Copy as git apply".
+# Если в буфере одна строка/плохое форматирование — сохраняем в PATCH.clipboard.txt и выходим с понятной ошибкой.
 
 $ErrorActionPreference = "Stop"
-
-# Resolve exact git executable
 $gitExe = (Get-Command git -ErrorAction Stop).Source
 
-function Run-Git {
-  param([string[]] $GitArgs, [switch] $Quiet)
-  if (!$GitArgs -or $GitArgs.Count -eq 0) { throw "[GIT] Empty argument list" }
-  if ($Quiet) { & $gitExe @GitArgs | Out-Null } else { & $gitExe @GitArgs }
-  if ($LASTEXITCODE -ne 0) { throw "[GIT] Command failed: git $($GitArgs -join ' ')" }
+function Ensure-GitOk {
+  & $gitExe rev-parse --is-inside-work-tree | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "Not a git repository." }
 }
+function Die($msg) { throw $msg }
 
-# 0) Ensure repo
-Run-Git @('rev-parse','--is-inside-work-tree') -Quiet
+Ensure-GitOk
 
 # 1) Clipboard
 $raw = Get-Clipboard
-if ([string]::IsNullOrWhiteSpace($raw)) { throw "[ERR] Clipboard is empty." }
+if ([string]::IsNullOrWhiteSpace($raw)) { Die "[ERR] Clipboard is empty." }
 
-# 2) Normalize newlines + strip common invisibles
+# 2) Normalize and basic clean
 $raw = $raw -replace "`r`n","`n" -replace "`r","`n"
 $raw = $raw -replace "[\uFEFF\u200B\u200E\u200F\u00A0]",""
 $raw = $raw.Trim()
 
-# 3) Strip Markdown code fences if present
-$raw = $raw -replace "(?s)^\s*```[a-zA-Z0-9_-]*\s*", ""
-$raw = $raw -replace "(?s)\s*```\s*$", ""
+# 3) Drop Markdown fences ```...```
+$raw = $raw -replace "(?s)^\s*```[a-zA-Z0-9_-]*\s*",""
+$raw = $raw -replace "(?s)\s*```\s*$",""
 $raw = $raw.Trim()
 
-# 4) Strip invisibles at START OF EACH LINE (не трогаем обычные пробелы)
-$raw = [regex]::Replace($raw, "(?m)^[\uFEFF\u200B\u200E\u200F\u00A0]+", "")
-
-# 5) Handle Codex 'Copy as git apply' heredoc wrapper: keep body between <<'EOF' and EOF
-if ($raw -match "(?s)<<'EOF'(.*)EOF") {
-  $raw = ($Matches[1] -replace "^\s+","").Trim()
-}
-
-# 6) If looks single-line or few lines -> heuristic reflow + **space fixes**
-if ( ($raw -split "`n").Length -le 2 ) {
-  Write-Host "[i] Heuristic reflow: input looks like a single line, trying to insert newlines…"
-  # collapse multiple whitespace to single spaces first
-  $s = " " + ($raw -replace "\s+"," ").Trim()
-
-  # insert line breaks before typical diff tokens (order matters)
-  $tokens = @(
-    ' diff --git ',
-    ' new file mode ',
-    ' deleted file mode ',
-    ' index ',
-    ' --- ',
-    ' +++ ',
-    ' @@ '
-  )
-  foreach ($t in $tokens) {
-    $s = $s -replace [regex]::Escape($t), ("`n" + $t.Trim() + " ")
-  }
-
-  # Mandatory space fixes that often get lost
-  # diff --gita/... -> diff --git a/...
-  $s = $s -replace "(?m)^diff --git(?=a/|b/)", "diff --git "
-  # index<sha>.. -> index <sha>..
-  $s = $s -replace "(?m)^index([0-9a-f]{7,40}\.\.[0-9a-f]{7,40})", "index `$1"
-  # ---a/... -> --- a/...
-  $s = $s -replace "(?m)^---(?=a/|/dev/null)", "--- "
-  # +++b/... -> +++ b/...
-  $s = $s -replace "(?m)^\+\+\+(?=b/|/dev/null)", "+++ "
-
-  # ensure each added/removed/context line starts on its own line after hunks
-  $s = $s -replace "(?<!`n)\+([^\+\-@ ].*)", "`n+$1"
-  $s = $s -replace "(?<!`n)\-([^\+\-@ ].*)", "`n-$1"
-
-  # cleanup excessive newlines
-  $s = $s -replace "`n{2,}","`n"
-  $raw = $s.Trim()
-}
-
-# 7) Keep from first 'From <sha>' or 'diff --git'
-$from = [regex]::Match($raw, "(?m)^\s*From [0-9a-f]{40}\b")
-$diff = [regex]::Match($raw, "(?m)^\s*diff --git\s+a/([^\s]+)\s+b/([^\s]+)")
-if     ($from.Success) { $raw = $raw.Substring($from.Index) }
-elseif ($diff.Success) { $raw = $raw.Substring($diff.Index) }
-
-# 7b) Ensure we have both --- and +++ headers for the first file if broken
-if ($diff.Success) {
-  $bPath = $diff.Groups[2].Value
-  $lines = $raw -split "`n"
-  for ($i=0; $i -lt [Math]::Min($lines.Length, 25); $i++) {
-    if ($lines[$i] -match "^\s*---\s+(/dev/null|a/.*)\s*$") {
-      $hasPlus = $false
-      for ($j=$i+1; $j -lt [Math]::Min($lines.Length, $i+6); $j++) {
-        if ($lines[$j] -match "^\s*\+\+\+\s+b/") { $hasPlus = $true; break }
-        if ($lines[$j] -match "^\s*@@ ") { break }
-      }
-      if (-not $hasPlus) {
-        $insertAt = $i+1
-        $lines = $lines[0..($insertAt-1)] + @("+++ b/$bPath") + $lines[$insertAt..($lines.Length-1)]
-        $raw = ($lines -join "`n")
-      }
-      break
-    }
+# 4) Если это "Copy as git apply" с heredoc — вырежем тело между <<'EOF' и последним отдельным EOF
+#   Требуем реальные переводы строк. Если их нет — не пытаемся «умничать».
+$body = $raw
+if ($body -match "(?s)<<'EOF'") {
+  # пробуем отрезать по настоящим переводам
+  if ($body -split "`n" | Measure-Object | Select-Object -ExpandProperty Count -gt 2) {
+    $m = [regex]::Match($body, "(?ms)<<'EOF'\s*(.*?)\s*^EOF\s*$")
+    if ($m.Success) { $body = $m.Groups[1].Value.Trim() }
   }
 }
 
-# 8) Must have at least one hunk '@@'
-if ($raw -notmatch "(?m)^\s*@@") {
-  $preview = (($raw -split "`n") | Select-Object -First 30) -join "`n"
-  throw "[ERR] No hunks found (^\s*@@). The clipboard likely contains headers only or was mangled by formatting.`n--- Preview ---`n$preview"
+# 5) Должны быть переносы строк; иначе — сохранить для анализа и выйти
+if (($body -split "`n").Length -le 1) {
+  Set-Content -Encoding utf8 -NoNewline -Path "PATCH.clipboard.txt" -Value $body
+  Die "[ERR] Clipboard looks like a single line (no real newlines). Saved to PATCH.clipboard.txt. Please recopy as plain text or save to a *.patch file."
 }
 
-# 9) Save to temp (UTF-8 no BOM)
+# 6) Обрезаем до первого diff/From (если до них есть префикс)
+if ($body -match "(?m)^\s*From [0-9a-f]{40}\b") {
+  $idx = ([regex]::Match($body,"(?m)^\s*From [0-9a-f]{40}\b")).Index
+  $body = $body.Substring($idx)
+} elseif ($body -match "(?m)^\s*diff --git\s") {
+  $idx = ([regex]::Match($body,"(?m)^\s*diff --git\s")).Index
+  $body = $body.Substring($idx)
+}
+
+# 7) Сохраняем во временный файл
 $tmp = Join-Path $env:TEMP ("codex_patch_{0}.patch" -f ([guid]::NewGuid().ToString("N")))
-[IO.File]::WriteAllText($tmp,$raw,[Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText($tmp, $body, [Text.UTF8Encoding]::new($false))
 Write-Host "[i] Patch saved to $tmp"
 
-# 10) Diagnostics
-$lines = $raw -split "`n"
-$first4 = ($lines | Select-Object -First 4) -join "`n"
-$firstHunk = ($lines | Where-Object { $_ -match "^\s*@@" } | Select-Object -First 1)
-Write-Host "[i] First lines:`n$first4"
-if ($firstHunk) { Write-Host "[i] First hunk line: $firstHunk" }
-
-# 11) Detect format
-$gitFormat = ($raw -match "(?m)^\s*From [0-9a-f]{40}\b" -and $raw -match "(?m)^\s*Subject:")
-$unified   = ($raw -match "(?m)^\s*diff --git\s")
-
-# 12) Apply
-try {
-  if ($gitFormat) {
-    Write-Host "[i] Trying: git am -3"
-    Run-Git @('am','-3',"$tmp")
-    Write-Host "[OK] Applied via git am"
-  } else {
-    Write-Host "[i] Trying: git apply --check/--whitespace=fix"
-    & $gitExe apply --check --whitespace=fix "$tmp"
-    if ($LASTEXITCODE -ne 0) {
-      Write-Host "[i] git apply --check failed, verbose output:"
-      & $gitExe apply -v --check --whitespace=fix "$tmp"
-      throw "[GIT] git apply --check failed"
-    }
-    Run-Git @('apply','--whitespace=fix',"$tmp")
-    Run-Git @('add','-A')
-    & $gitExe commit -m "Apply patch from Codex" | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "[GIT] Commit failed (possibly empty patch)." }
-    Write-Host "[OK] Applied via git apply"
-  }
+# 8) Строгая валидация структуры (без попыток «чинить»)
+if (-not (Select-String -Path $tmp -Pattern '^\s*diff --git ' -SimpleMatch -CaseSensitive -List)) {
+  Die "[ERR] No 'diff --git' headers found. Ask Codex for a unified diff or use 'Copy as git apply'."
 }
-catch {
-  if ($gitFormat) { & $gitExe am --abort | Out-Null }
-  Write-Host "[i] Falling back to: git apply --reject"
-  & $gitExe apply --reject --whitespace=fix "$tmp"
+if (-not (Select-String -Path $tmp -Pattern '^\s*@@ ' -SimpleMatch -CaseSensitive -List)) {
+  $preview = (Get-Content -Raw -Path $tmp | Select-Object -First 1)
+  Die "[ERR] No hunks ('@@ ... @@') found. The patch may be incomplete."
+}
+
+# 9) Применение
+$looksGitFormat = (Select-String -Path $tmp -Pattern '^\s*From [0-9a-f]{40}\b' -CaseSensitive -List) -and
+                  (Select-String -Path $tmp -Pattern '^\s*Subject:' -CaseSensitive -List)
+
+if ($looksGitFormat) {
+  Write-Host "[i] Trying: git am -3"
+  & $gitExe am -3 "$tmp"
   if ($LASTEXITCODE -ne 0) {
-    Write-Host "[i] git apply --reject failed, verbose output:"
-    & $gitExe apply -v --reject --whitespace=fix "$tmp"
-    throw "[GIT] git apply --reject failed"
+    & $gitExe am --abort | Out-Null
+    Die "[ERR] git am failed. Export the patch as unified diff instead of git-format."
   }
-  Run-Git @('add','-A')
-  & $gitExe commit -m "Apply patch from Codex (with rejects)" | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "[GIT] Commit failed after rejects." }
-  Write-Host "[OK] Applied via git apply --reject (check *.rej if any)"
+  Write-Host "[OK] Applied via git am"
+} else {
+  Write-Host "[i] Trying: git apply --check/--whitespace=fix"
+  & $gitExe apply --check --whitespace=fix "$tmp"
+  if ($LASTEXITCODE -ne 0) { Die "[ERR] git apply --check failed. Ensure the patch is a plain unified diff." }
+
+  & $gitExe apply --whitespace=fix "$tmp"; if ($LASTEXITCODE -ne 0) { Die "[ERR] git apply failed." }
+  & $gitExe add -A; if ($LASTEXITCODE -ne 0) { Die "[ERR] git add failed." }
+
+  & $gitExe commit -m "Apply patch from Codex"
+  if ($LASTEXITCODE -ne 0) { Die "[ERR] git commit failed (possibly empty patch)." }
+  Write-Host "[OK] Applied via git apply"
 }
 
-# 13) Sync
+# 10) Синхронизация
 & $gitExe pull --rebase --autostash origin main | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "[GIT] pull --rebase failed." }
-Run-Git @('push','origin','HEAD:main')
+if ($LASTEXITCODE -ne 0) { Die "[ERR] git pull --rebase failed." }
+& $gitExe push origin HEAD:main
+if ($LASTEXITCODE -ne 0) { Die "[ERR] git push failed." }
 
 Write-Host "[DONE] Synced with GitHub."
-Remove-Item -Force $tmp

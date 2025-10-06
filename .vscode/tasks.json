@@ -5,7 +5,7 @@
       "label": "Codex: Apply patch & Push (cross-platform)",
       "type": "shell",
       "command": "echo",
-      "args": ["Select OS-specific override"],
+      "args": ["Codex patch task"],
       "options": { "cwd": "${workspaceFolder}" },
       "osx": {
         "command": "./apply_patch_mac.sh",
