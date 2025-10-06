@@ -1,83 +1,57 @@
-#!/usr/bin/env zsh
+#!/bin/zsh
 set -euo pipefail
-
 git rev-parse --is-inside-work-tree >/dev/null
 
-# temp файлы (BSD mktemp)
-TMPBASE="$(mktemp -t codex_patch)"
-RAW="${TMPBASE}.raw"
-FIX="${TMPBASE}.patch"
+RAW="$(pbpaste)"
 
-# буфер → файл + нормализация перевода строк
-pbpaste | perl -pe 's/\r\n/\n/g; s/\r/\n/g' > "$RAW"
+# Вырезаем тело heredoc из "Copy as git apply"
+if [[ "$RAW" == *"<<"'EOF'*"EOF"* ]]; then
+  BODY=$(print -r -- "$RAW" | awk '
+    /<<'\''EOF'\''/ {inb=1; next}
+    inb && /^EOF$/ {inb=0; exit}
+    inb {print}
+  ')
+else
+  BODY="$RAW"
+fi
 
-# Валидация: это вообще diff?
-if ! grep -qE '^diff --git ' "$RAW"; then
-  echo "[ERR] В буфере нет заголовков 'diff --git'. Попросите Codex выдать unified diff или 'Copy as git apply'."
-  rm -f "$RAW" 2>/dev/null || true
+# Базовая валидация
+if ! print -r -- "$BODY" | grep -q $'\n'; then
+  echo "[ERR] Clipboard looks like a single line (no newlines). Save patch to a file or recopy as plain text."
+  printf "%s" "$BODY" > PATCH.clipboard.txt
   exit 1
 fi
 
-# Нормализация «стрелочного» формата diff --git .* => path  (best-effort)
-if grep -qE '^diff --git .*=> ' "$RAW"; then
-  echo "[i] Обнаружен «стрелочный» формат. Пробую нормализовать…"
-  awk '
-    /^diff --git .*=> .*/ { match($0, /=>[[:space:]]+(.+)$/, m); dst=m[1]; print "diff --git a/" dst " b/" dst; skip=1; next }
-    { print }
-  ' "$RAW" > "$FIX.tmp1"
+# Снимаем ```...```
+BODY="$(print -r -- "$BODY" | sed '1s/^```[[:alnum:]_-]*[[:space:]]*//; $s/[[:space:]]*```$//')"
 
-  awk '
-    /^diff --git a\/.+ b\/.+$/ { inhdr=1; print; next }
-    inhdr && !seen_hdr++ {
-      # эмулируем новый файл
-      print "new file mode 100644"
-      print "index 0000000..0000000"
-      match($0,/diff --git a\/.+ b\/(.+)$/,m)
-      print "--- /dev/null"
-      print "+++ b/" m[1]
-      inhdr=0
-      next
-    }
-    { print }
-  ' "$FIX.tmp1" > "$FIX"
-else
-  cp "$RAW" "$FIX"
+# От первого diff/From
+if print -r -- "$BODY" | grep -qE '^[[:space:]]*From [0-9a-f]{40} '; then
+  BODY="$(print -r -- "$BODY" | awk 'f||/^[[:space:]]*From [0-9a-f]{40} /{f=1;print}')"
+elif print -r -- "$BODY" | grep -qE '^[[:space:]]*diff --git '; then
+  BODY="$(print -r -- "$BODY" | awk 'f||/^[[:space:]]*diff --git /{f=1;print}')"
 fi
 
-# Сначала пытаемся как git-format (Copy as git apply / git am)
-if grep -qE '^From [0-9a-f]{40} ' "$FIX" && grep -q '^Subject:' "$FIX"; then
-  if git am -3 < "$FIX"; then
-    echo "[OK] Applied via git am"
-  else
-    git am --abort || true
-    echo "[i] git am failed. Trying git apply…"
-    if git apply --check --whitespace=fix "$FIX"; then
-      git apply --whitespace=fix "$FIX"
-      git add -A
-      git commit -m "Apply patch from Codex" || true
-    else
-      echo "[i] git apply --check failed. Using --reject…"
-      git apply --reject --whitespace=fix "$FIX"
-      git add -A
-      git commit -m "Apply patch from Codex (with rejects)" || true
-    fi
-  fi
+TMP="$(mktemp -t codex_patch.XXXXXX.patch)"
+print -r -- "$BODY" > "$TMP"
+echo "[i] Patch saved to $TMP"
+
+# Проверки структуры
+grep -qE '^[[:space:]]*diff --git ' "$TMP" || { echo "[ERR] No 'diff --git' headers found."; exit 1; }
+grep -qE '^[[:space:]]*@@ '        "$TMP" || { echo "[ERR] No hunks ('@@ ... @@') found."; head -n 30 "$TMP"; exit 1; }
+
+# Применение
+if grep -qE '^[[:space:]]*From [0-9a-f]{40} ' "$TMP" && grep -qE '^[[:space:]]*Subject:' "$TMP"; then
+  echo "[i] Trying: git am -3"
+  git am -3 < "$TMP" || { git am --abort || true; echo "[i] git am failed. Trying git apply"; git apply --check --whitespace=fix "$TMP"; git apply --whitespace=fix "$TMP"; git add -A; git commit -m "Apply patch from Codex"; }
 else
-  # Обычный unified diff
-  if git apply --check --whitespace=fix "$FIX"; then
-    git apply --whitespace=fix "$FIX"
-    git add -A
-    git commit -m "Apply patch from Codex" || true
-  else
-    echo "[i] git apply --check failed. Using --reject…"
-    git apply --reject --whitespace=fix "$FIX"
-    git add -A
-    git commit -m "Apply patch from Codex (with rejects)" || true
-  fi
+  echo "[i] Trying: git apply --check/--whitespace=fix"
+  git apply --check --whitespace=fix "$TMP"
+  git apply --whitespace=fix "$TMP"
+  git add -A
+  git commit -m "Apply patch from Codex"
 fi
 
-git pull --rebase --autostash || true
-git push
+git pull --rebase --autostash origin main || true
+git push origin HEAD:main
 echo "[DONE] Synced with GitHub."
-
-rm -f "$RAW" "$FIX" "$FIX.tmp1" 2>/dev/null || true
