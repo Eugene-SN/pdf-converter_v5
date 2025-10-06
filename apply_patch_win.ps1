@@ -1,40 +1,41 @@
 # apply_patch_win.ps1
-# Применяет патч из буфера (Codex) и пушит в GitHub (Windows)
+# Apply patch from clipboard, commit and push to origin/main (Windows).
+# Works with git-format-patch ("From <sha> ... Subject:") and unified diff ("diff --git ...").
 
 $ErrorActionPreference = "Stop"
 
-# 0) Проверка: мы в git-репозитории
+# 0) Ensure we are inside a git work tree
 git rev-parse --is-inside-work-tree | Out-Null
 
-# 1) Буфер → строка + нормализация CRLF
+# 1) Read clipboard and normalize newlines
 $raw = Get-Clipboard
 if ([string]::IsNullOrWhiteSpace($raw)) {
-  Write-Error "[ERR] Clipboard is empty."
+  throw "[ERR] Clipboard is empty."
 }
+# Normalize CRLF/CR to LF for git apply
 $raw = $raw -replace "`r`n", "`n" -replace "`r", "`n"
 
-# 2) Временный файл
+# 2) Save to a temp file (UTF-8 without BOM)
 $tmp = Join-Path $env:TEMP ("codex_patch_{0}.patch" -f ([guid]::NewGuid().ToString("N")))
 [System.IO.File]::WriteAllText($tmp, $raw, [Text.UTF8Encoding]::new($false))
 Write-Host "[i] Patch saved to $tmp"
 
-# 3) Валидация: это diff?
+# 3) Validate: must look like a git-compatible diff
 if ($raw -notmatch '^diff --git ') {
-  throw "[ERR] В буфере нет заголовков 'diff --git'. Попросите Codex выдать unified diff или 'Copy as git apply'."
+  throw "[ERR] Clipboard does not contain 'diff --git' headers. Ask Codex for a unified diff or 'Copy as git apply'."
 }
 
-# 4) Детект git-format patch (git am) или unified diff
+# 4) Detect git-format vs unified
 $looksGitFormat = ($raw -match '^From [0-9a-f]{40} ' -and $raw -match '(?m)^Subject:')
 
 try {
   if ($looksGitFormat) {
-    Write-Host "[i] Trying git am -3…"
+    Write-Host "[i] Trying: git am -3"
     git am -3 "$tmp"
     Write-Host "[OK] Applied via git am"
   }
   else {
-    Write-Host "[i] Trying git apply…"
-    # Сначала «dry-run» проверка
+    Write-Host "[i] Trying: git apply --check/--whitespace=fix"
     git apply --check --whitespace=fix "$tmp" | Out-Null
     git apply --whitespace=fix "$tmp"
     git add -A
@@ -43,9 +44,7 @@ try {
   }
 }
 catch {
-  # fallback: если не прошёл ни am, ни apply --check — пробуем --reject
   if ($looksGitFormat) {
-    Write-Host "[i] git am failed, aborting…"
     git am --abort | Out-Null
   }
   Write-Host "[i] Falling back to: git apply --reject"
@@ -55,9 +54,9 @@ catch {
   Write-Host "[OK] Applied via git apply --reject (check *.rej if any)"
 }
 
-# 5) Синхронизация
-git pull --rebase --autostash | Out-Null
-git push
-Write-Host "[DONE] Synced with GitHub."
+# 5) Sync with origin/main explicitly (avoid divergent pull behavior)
+git pull --rebase --autostash origin main | Out-Null
+git push origin HEAD:main
 
+Write-Host "[DONE] Synced with GitHub."
 Remove-Item -Force $tmp
