@@ -5,7 +5,7 @@
       "label": "Codex: Apply patch & Push (auto, cross-platform)",
       "type": "shell",
 
-      # Значения по умолчанию — для macOS / Linux:
+      // Значения по умолчанию — для macOS / Linux:
       "command": "./apply_patch_mac.sh",
       "options": {
         "shell": {
@@ -14,7 +14,7 @@
         }
       },
 
-      # Переопределения только для Windows:
+      // Переопределения только для Windows:
       "windows": {
         "command": "powershell",
         "args": [
