@@ -4,28 +4,33 @@
     {
       "label": "Codex: Apply patch & Push (auto, cross-platform)",
       "type": "shell",
+
       "command": "./apply_patch_mac.sh",
-      "options": {
-        "shell": {
-          "executable": "/bin/zsh",
-          "args": ["-lc"]
+      "osx": {
+        "command": "./apply_patch_mac.sh",
+        "options": {
+          "shell": {
+            "executable": "/bin/zsh",
+            "args": ["-lc"]
+          }
         }
       },
+
       "windows": {
         "command": "powershell",
         "args": [
           "-NoProfile",
-          "-ExecutionPolicy",
-          "Bypass",
-          "-File",
-          "${workspaceFolder}\\apply_patch_win.ps1"
+          "-ExecutionPolicy", "Bypass",
+          "-File", "${workspaceFolder}\\apply_patch_win.ps1"
         ],
         "options": {
           "shell": {
-            "executable": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+            "executable": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            "args": []   // <-- сбрасываем любые наследованные аргументы
           }
         }
       },
+
       "problemMatcher": [],
       "group": { "kind": "build", "isDefault": true }
     }
