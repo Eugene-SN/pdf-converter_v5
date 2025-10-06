@@ -335,11 +335,12 @@ class DoclingProcessor:
             self.chunker = None
     
     async def process_document(
-        self, 
-        file_path: str, 
-        output_dir: str, 
+        self,
+        file_path: str,
+        output_dir: str,
         use_ocr: bool = False,
-        ocr_languages: str = "eng"
+        ocr_languages: str = "eng",
+        allow_ocr_fallback: bool = True,
     ) -> DocumentStructure:
         """
         ✅ ИСПРАВЛЕНО: Главный метод обработки документа
@@ -398,7 +399,11 @@ class DoclingProcessor:
                 )
 
             # ✅ НОВОЕ: Автоматический fallback на OCR, если без OCR контент пустой
-            if _structure_is_empty(document_structure) and not use_ocr:
+            if (
+                _structure_is_empty(document_structure)
+                and not use_ocr
+                and allow_ocr_fallback
+            ):
                 logger.warning(
                     "⚠️ Docling вернул пустую структуру без OCR. Повторная попытка с OCR включенным."
                 )
@@ -419,8 +424,15 @@ class DoclingProcessor:
                     raise
 
             if _structure_is_empty(document_structure):
+                if allow_ocr_fallback:
+                    raise ValueError(
+                        "Docling returned empty structure even after OCR fallback"
+                    )
+                logger.warning(
+                    "⚠️ Docling вернул пустую структуру, OCR fallback отключен."
+                )
                 raise ValueError(
-                    "Docling returned empty structure even after OCR fallback"
+                    "Docling returned empty structure and OCR fallback is disabled"
                 )
 
             # Расчет статистики обработки
@@ -433,6 +445,7 @@ class DoclingProcessor:
                 "docling_version": "2.0+",
                 "timestamp": datetime.now().isoformat(),
                 "ocr_fallback_triggered": fallback_used,
+                "ocr_fallback_allowed": allow_ocr_fallback,
             }
 
             document_structure.metadata.setdefault("processing_notes", [])
